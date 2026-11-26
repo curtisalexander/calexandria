@@ -35,8 +35,14 @@ calx "what is a fat-tailed distribution?"   # ask once
 calx                             # start a conversation; /exit to quit
 calx -m gpt-6.2-astra --effort high
 calx -y "run the tests and fix what fails"   # no approval prompts
+calx sessions                    # list recent sessions
+calx -c                          # continue the latest session in this directory
+calx -r 4f02f1ac "and then?"     # resume a session by the start of its ID
 calx logout
 ```
+
+Every conversation is saved to `~/.calx/sessions.db` (SQLite) after each turn,
+including what the tools read, so treat it as private as your files.
 
 `calx login` opens your browser and waits for it on `127.0.0.1:1455`. Over SSH,
 or when the browser cannot reach that port, paste the URL the browser ends on
@@ -67,11 +73,10 @@ the Keychain to ask once after each update whether calx may use its key.
 ## Roadmap
 
 1. More tools (search, find files), cancelling a running turn, and approval rules.
-2. Sessions saved as append-only JSONL: resume, replay, and evals.
-3. More model backends: Chat Completions (local MLX, Ollama, work gateways),
+2. More model backends: Chat Completions (local MLX, Ollama, work gateways),
    API keys, and a configurable OAuth flow for work.
-4. A terminal UI.
-5. Memory, and extensions written in Python.
+3. A terminal UI.
+4. Memory, and extensions written in Python.
 
 Longer-term ideas, such as compaction and where tools run, are in
 [BACKLOG.md](BACKLOG.md).

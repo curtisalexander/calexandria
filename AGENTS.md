@@ -16,6 +16,9 @@ never pip. It must run on Windows, macOS, and Linux.
   `std::process` directly, so they can later run in a container, VM, or over SSH
   while the harness and its credentials stay put.
 - `crates/calx-core/src/store.rs`: secrets, encrypted with a key in the OS keychain.
+- `crates/calx-core/src/session.rs`: sessions in SQLite (`sessions.db`), an
+  append-only list of items per session numbered from 1. Never rewrite saved
+  items; later features such as compaction add records that refer to them.
 
 ## Security
 

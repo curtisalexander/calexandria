@@ -7,6 +7,7 @@ pub mod auth;
 pub mod environment;
 pub mod message;
 pub mod responses;
+pub mod session;
 mod sse;
 pub mod store;
 pub mod tools;
@@ -35,7 +36,7 @@ pub fn new_id() -> String {
 pub(crate) fn write_private(path: &Path, contents: &str) -> Result<()> {
     use std::io::Write;
     if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
+        create_private_dir(dir)?;
     }
     let tmp = path.with_extension("tmp");
     let mut options = std::fs::OpenOptions::new();
@@ -52,4 +53,15 @@ pub(crate) fn write_private(path: &Path, contents: &str) -> Result<()> {
     file.sync_all()?;
     drop(file);
     std::fs::rename(&tmp, path).with_context(|| format!("could not write {}", path.display()))
+}
+
+/// Creates a directory, and on Unix makes it readable only by the current user.
+pub(crate) fn create_private_dir(dir: &Path) -> Result<()> {
+    std::fs::create_dir_all(dir).with_context(|| format!("could not create {}", dir.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
 }

@@ -23,9 +23,9 @@ everything here, or in this order; the README roadmap is the near-term plan.
 
   Needs first: saved sessions, stable item IDs, and a running context-size count
   (calx already reads token usage from every response).
-- **Where history lives.** The README plans append-only JSONL. exe.dev chose
-  SQLite for Shelley and is glad it did; SQLite would also serve memory and
-  search. Decide before building sessions.
+- **History lives in SQLite** (`sessions.db`): an append-only `items` table
+  with stable per-session sequence numbers, which compaction records can point at.
+  Next: full-text search over sessions (SQLite FTS5) and memory in the same database.
 - **Introspection.** Let calx query its own past sessions, both for the model
   (look up compacted items) and for tuning (backtest compaction on old sessions).
 
