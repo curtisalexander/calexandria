@@ -9,6 +9,8 @@ never pip. It must run on Windows, macOS, and Linux.
 
 - `crates/calx-core`: auth, providers, and message types. Keep provider wire
   formats inside their provider module; the rest of the code uses `message.rs`.
+- `crates/calx-core/src/agent.rs`: the agent loop. Tools live in `tools/` and
+  implement the `Tool` trait.
 - `crates/calx`: the CLI. Keep it a thin frontend over `calx-core`.
 
 ## Checks

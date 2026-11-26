@@ -1,12 +1,16 @@
 use std::io::{BufRead, Write};
 
 use anyhow::Result;
+use calx_core::agent::Agent;
 use calx_core::auth::{ChatGptAuth, CredentialStore, PendingLogin};
-use calx_core::message::{Event, Message};
-use calx_core::responses::{Request, ResponsesClient};
+use calx_core::message::Event;
+use calx_core::responses::ResponsesClient;
+use calx_core::tools::{Shell, Toolbox};
 use clap::{Parser, Subcommand};
 
 const DIM: &str = "\x1b[2m";
+const BOLD: &str = "\x1b[1m";
+const RED: &str = "\x1b[31m";
 const RESET: &str = "\x1b[0m";
 
 /// Calexandria: a personal agent harness.
@@ -26,6 +30,10 @@ struct Cli {
     /// Reasoning effort: none, low, medium, high, or xhigh.
     #[arg(long, env = "CALX_EFFORT", default_value = "medium")]
     effort: String,
+
+    /// Run file edits and shell commands without asking first.
+    #[arg(long, short = 'y')]
+    yes: bool,
 }
 
 #[derive(Subcommand)]
@@ -92,106 +100,135 @@ fn logout() -> Result<()> {
     Ok(())
 }
 
-fn system_prompt() -> String {
+fn system_prompt(shell: &Shell) -> String {
     let cwd = std::env::current_dir()
         .map(|p| p.display().to_string())
         .unwrap_or_default();
     format!(
         "You are calx (Calexandria), Curtis Alexander's personal assistant, running in a terminal.\n\
          Be direct and concise. Format for a terminal: short paragraphs, plain lists, fenced code.\n\
+         You can read, write, and edit files and run {} commands with your tools. Use them to \
+         check facts about this machine instead of guessing. Read a file before editing it.\n\
          Operating system: {}. Working directory: {cwd}.",
+        shell.name(),
         std::env::consts::OS
     )
 }
 
 async fn chat(cli: &Cli) -> Result<()> {
     let auth = ChatGptAuth::load(CredentialStore::open()?)?;
-    let client = ResponsesClient::new(auth);
-    let system = system_prompt();
-    let session_id = calx_core::new_id();
-    let effort = (cli.effort != "none").then_some(cli.effort.as_str());
-    let mut messages = Vec::new();
+    let shell = Shell::detect();
+    let mut agent = Agent {
+        client: ResponsesClient::new(auth),
+        system: system_prompt(&shell),
+        toolbox: Toolbox::builtin(shell),
+        model: cli.model.clone(),
+        effort: (cli.effort != "none").then(|| cli.effort.clone()),
+        session_id: calx_core::new_id(),
+        items: Vec::new(),
+    };
 
     if !cli.prompt.is_empty() {
-        messages.push(Message::user(cli.prompt.join(" ")));
-        let request = Request {
-            model: &cli.model,
-            system: &system,
-            messages: &messages,
-            effort,
-            session_id: &session_id,
-        };
-        return turn(&client, &request).await.map(|_| ());
+        return turn(&mut agent, &cli.prompt.join(" "), cli.yes).await;
     }
 
     println!("{DIM}calx · {} · /exit to quit{RESET}", cli.model);
-    let stdin = std::io::stdin();
     loop {
         print!("\n> ");
         std::io::stdout().flush()?;
-        let mut line = String::new();
-        if stdin.lock().read_line(&mut line)? == 0 {
-            break;
-        }
+        let Some(line) = read_line()? else { break };
         let line = line.trim();
         match line {
             "" => continue,
             "/exit" | "/quit" => break,
             _ => {}
         }
-        messages.push(Message::user(line));
-        let request = Request {
-            model: &cli.model,
-            system: &system,
-            messages: &messages,
-            effort,
-            session_id: &session_id,
-        };
-        match turn(&client, &request).await {
-            Ok(text) => messages.push(Message::assistant(text)),
-            Err(e) => {
-                // Drop the unanswered question so the next turn starts clean.
-                messages.pop();
-                eprintln!("\nerror: {e:#}");
-            }
+        let before = agent.items.len();
+        if let Err(e) = turn(&mut agent, line, cli.yes).await {
+            // Drop the failed turn so the next one starts from a valid conversation.
+            agent.items.truncate(before);
+            eprintln!("\n{RED}error:{RESET} {e:#}");
         }
     }
     Ok(())
 }
 
-/// Streams one reply to the terminal and returns its text.
-async fn turn(client: &ResponsesClient, request: &Request<'_>) -> Result<String> {
+fn read_line() -> Result<Option<String>> {
+    let mut line = String::new();
+    Ok((std::io::stdin().lock().read_line(&mut line)? > 0).then_some(line))
+}
+
+/// Runs one prompt, printing the reply and tool activity as it happens.
+async fn turn(agent: &mut Agent, prompt: &str, yes: bool) -> Result<()> {
     let mut out = std::io::stdout();
     let mut in_reasoning = false;
-    let reply = client
-        .stream(request, |event| {
-            match event {
-                Event::ReasoningDelta(delta) => {
-                    if !in_reasoning {
-                        in_reasoning = true;
-                        let _ = write!(out, "{DIM}");
-                    }
-                    let _ = write!(out, "{delta}");
+    let mut total = calx_core::message::Usage::default();
+    let mut on_event = |event: Event| {
+        let end_reasoning = |out: &mut std::io::Stdout, in_reasoning: &mut bool| {
+            if *in_reasoning {
+                *in_reasoning = false;
+                let _ = write!(out, "{RESET}\n\n");
+            }
+        };
+        match event {
+            Event::ReasoningDelta(delta) => {
+                if !in_reasoning {
+                    in_reasoning = true;
+                    let _ = write!(out, "{DIM}");
                 }
-                Event::TextDelta(delta) => {
-                    if in_reasoning {
-                        in_reasoning = false;
-                        let _ = write!(out, "{RESET}\n\n");
-                    }
-                    let _ = write!(out, "{delta}");
+                let _ = write!(out, "{delta}");
+            }
+            Event::TextDelta(delta) => {
+                end_reasoning(&mut out, &mut in_reasoning);
+                let _ = write!(out, "{delta}");
+            }
+            Event::ToolStarted { name, summary } => {
+                end_reasoning(&mut out, &mut in_reasoning);
+                let _ = writeln!(out, "{BOLD}▸ {name}{RESET} {}", one_line(&summary, 200));
+            }
+            Event::ToolFinished {
+                output, is_error, ..
+            } => {
+                let color = if is_error { RED } else { DIM };
+                let lines: Vec<&str> = output.lines().collect();
+                for line in lines.iter().take(4) {
+                    let _ = writeln!(out, "  {color}{}{RESET}", one_line(line, 160));
+                }
+                if lines.len() > 4 {
+                    let _ = writeln!(out, "  {DIM}… {} more lines{RESET}", lines.len() - 4);
                 }
             }
-            let _ = out.flush();
-        })
-        .await;
+            Event::Usage(u) => total += u,
+        }
+        let _ = out.flush();
+    };
+    let mut approve = |name: &str, _summary: &str| {
+        if yes {
+            return true;
+        }
+        print!("  {BOLD}Run {name}?{RESET} [y/N] ");
+        let _ = std::io::stdout().flush();
+        matches!(read_line(), Ok(Some(answer)) if matches!(answer.trim().to_lowercase().as_str(), "y" | "yes"))
+    };
+    let result = agent.run(prompt, &mut on_event, &mut approve).await;
     if in_reasoning {
         print!("{RESET}");
     }
-    let reply = reply?;
-    let u = reply.usage;
+    result?;
     println!(
         "\n{DIM}[{} in, {} cached · {} out]{RESET}",
-        u.input_tokens, u.cached_input_tokens, u.output_tokens
+        total.input_tokens, total.cached_input_tokens, total.output_tokens
     );
-    Ok(reply.text)
+    Ok(())
+}
+
+/// Shortens text to one line of at most `max` characters for display.
+fn one_line(text: &str, max: usize) -> String {
+    let first = text.lines().next().unwrap_or_default();
+    let more = text.lines().nth(1).is_some();
+    let mut s: String = first.chars().take(max).collect();
+    if more || first.chars().count() > max {
+        s.push('…');
+    }
+    s
 }

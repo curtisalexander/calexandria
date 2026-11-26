@@ -2,10 +2,12 @@
 //! types the rest of the harness is built on. Frontends such as the `calx`
 //! command-line program depend on this crate and stay thin.
 
+pub mod agent;
 pub mod auth;
 pub mod message;
 pub mod responses;
 mod sse;
+pub mod tools;
 
 use std::path::PathBuf;
 
