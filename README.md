@@ -71,6 +71,11 @@ move it into the prompt. The notes edit with vim keys (motions, `dd`, `o`, `u`,
 visual mode, `/` search); they open in insert mode, and Esc in normal mode
 leaves them without stopping the turn.
 
+With `--prompt-keys vim` (or `CALX_PROMPT_KEYS=vim`) the
+prompt edits with vim keys too: each message starts in insert mode, an `N` in
+the margin marks normal mode, Enter sends from either mode, and during a turn
+Esc stops it only from normal mode with an empty prompt.
+
 In the plain view, a paste of several lines is one prompt, and a line that ends
 with `\` continues on the next, as in a shell. When calx asks to run a tool, answer `y` yes, `n` no, `a`
 always for that tool this session, or `?` for why it asks.
@@ -87,6 +92,7 @@ into the terminal instead.
 | Model | `-m`, `--model` | `CALX_MODEL` | `gpt-6.2-sol` |
 | Reasoning effort | `--effort` | `CALX_EFFORT` | `medium` |
 | Typing while calx works | `--while-busy` | `CALX_WHILE_BUSY` | `steer` (or `queue`, `stop`) |
+| Prompt keys in the panel view | `--prompt-keys` | `CALX_PROMPT_KEYS` | `plain` (or `vim`) |
 | Shell for the `shell` tool | | `CALX_SHELL` | bash, else PowerShell |
 | Encryption key, instead of the keychain | | `CALX_AUTH_KEY` | |
 | State directory | | `CALX_HOME` | `~/.calx` |

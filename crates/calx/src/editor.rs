@@ -12,31 +12,50 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 
+/// Which keys the prompt edits with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+pub enum Keys {
+    #[default]
+    Plain,
+    Vim,
+}
+
 pub struct Editor {
     state: EditorState,
     keys: EditorEventHandler,
     vim: bool,
+    /// Show vim's mode on the last row. The prompt shows it in its margin instead.
+    status_line: bool,
 }
 
 impl Editor {
     /// Plain editing keys: arrows, Home and End, Ctrl-A and Ctrl-E, Ctrl-W
     /// and Ctrl-K, and Alt-F and Alt-B by word.
     pub fn plain() -> Self {
-        let mut editor = Self {
-            state: EditorState::default(),
-            keys: EditorEventHandler::emacs_mode(),
-            vim: false,
-        };
-        editor.state.mode = EditorMode::Insert;
-        editor
+        Self::new(Keys::Plain, "", false)
     }
 
     /// Vim keys, starting in insert mode so a quick note needs no `i`.
     pub fn vim(text: &str) -> Self {
+        Self::new(Keys::Vim, text, true)
+    }
+
+    /// The prompt, with the keys the user chose.
+    pub fn prompt(keys: Keys) -> Self {
+        Self::new(keys, "", false)
+    }
+
+    fn new(keys: Keys, text: &str, status_line: bool) -> Self {
+        let vim = keys == Keys::Vim;
         let mut editor = Self {
             state: EditorState::new(Lines::from(text)),
-            keys: EditorEventHandler::vim_mode(),
-            vim: true,
+            keys: if vim {
+                EditorEventHandler::vim_mode()
+            } else {
+                EditorEventHandler::emacs_mode()
+            },
+            vim,
+            status_line,
         };
         editor.state.mode = EditorMode::Insert;
         editor.cursor_to_end();
@@ -56,9 +75,11 @@ impl Editor {
         self.cursor_to_end();
     }
 
+    /// Empties the editor, back in insert mode for the next message.
     pub fn take(&mut self) -> String {
         let text = self.text();
         self.set("");
+        self.state.mode = EditorMode::Insert;
         text
     }
 
@@ -113,7 +134,7 @@ impl Editor {
             .base(Style::default())
             .cursor_style(Style::default().add_modifier(Modifier::REVERSED))
             .selection_style(Style::default().bg(Color::DarkGray));
-        theme = if self.vim {
+        theme = if self.status_line {
             theme.status_line(
                 EditorStatusLine::default()
                     .style_mode(Style::default().fg(Color::Black).bg(Color::Yellow))
@@ -135,6 +156,30 @@ impl Editor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn press(editor: &mut Editor, keys: &str) {
+        for c in keys.chars() {
+            let code = if c == '\x1b' {
+                KeyCode::Esc
+            } else {
+                KeyCode::Char(c)
+            };
+            editor.key(KeyEvent::new(code, KeyModifiers::NONE));
+        }
+    }
+
+    #[test]
+    fn a_vim_prompt_edits_in_normal_mode_and_takes_back_to_insert() {
+        let mut editor = Editor::prompt(Keys::Vim);
+        press(&mut editor, "fix the test\x1bbdw");
+        assert!(editor.is_normal_mode());
+        assert_eq!(editor.text(), "fix the ");
+        assert_eq!(editor.take(), "fix the ");
+        assert!(!editor.is_normal_mode());
+        // In insert mode, letters are text again.
+        press(&mut editor, "dw");
+        assert_eq!(editor.text(), "dw");
+    }
 
     #[test]
     fn pasted_lines_and_ctrl_j_keep_their_newlines() {

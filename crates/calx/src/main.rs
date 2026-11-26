@@ -55,6 +55,10 @@ struct Cli {
     #[arg(long, env = "CALX_WHILE_BUSY", value_enum, default_value_t = status::Busy::Steer)]
     while_busy: status::Busy,
 
+    /// Keys for editing the prompt in the panel view: plain, or vim.
+    #[arg(long, env = "CALX_PROMPT_KEYS", value_enum, default_value_t = editor::Keys::Plain)]
+    prompt_keys: editor::Keys,
+
     /// Start in the panel view instead of plain scrolling output.
     #[arg(long, short = 'p', conflicts_with = "prompt")]
     panels: bool,
@@ -242,6 +246,7 @@ async fn chat(cli: &Cli) -> Result<()> {
         let mut app = carrels::App::new(&agent, info, cli.yes, std::mem::take(&mut simple.tally));
         app.always = simple.always;
         app.busy = cli.while_busy;
+        app.set_prompt_keys(cli.prompt_keys);
         carrels::run(app, &mut agent, &save).await?;
     }
     Ok(())

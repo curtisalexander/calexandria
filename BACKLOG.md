@@ -79,6 +79,5 @@ everything here, or in this order; the README roadmap is the near-term plan.
   terminal, so it can join pastes and `\` continuations but cannot edit across
   lines. Drawing its prompt with ratatui's inline viewport, with output inserted
   above it, would give it the panel view's editor, at the cost of raw mode.
-- **Vim keys in the prompt** as an option (`edtui` already does the notes).
 - **`$EDITOR` for the notes or prompt**: open the text in real vim and read it
   back when vim exits.

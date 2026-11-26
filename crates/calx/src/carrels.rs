@@ -22,7 +22,7 @@ use ratatui::widgets::{Block, Paragraph, Wrap};
 use ratatui::{DefaultTerminal, Frame};
 use tokio::sync::oneshot;
 
-use crate::editor::Editor;
+use crate::editor::{Editor, Keys};
 use crate::marginalia::one_line;
 use crate::notes::Notes;
 use crate::status::{self, Busy, Tally};
@@ -185,6 +185,7 @@ pub struct App {
     tools: Vec<ToolRow>,
     mix: Mix,
     input: Editor,
+    prompt_keys: Keys,
     /// Conversation lines scrolled up from the bottom.
     scroll: u16,
     layout: usize,
@@ -227,6 +228,7 @@ impl App {
             tools: Vec::new(),
             mix: Mix::default(),
             input: Editor::plain(),
+            prompt_keys: Keys::Plain,
             scroll: 0,
             layout: 0,
             side: Panel::Diff,
@@ -499,6 +501,12 @@ impl App {
         true
     }
 
+    /// Sets which keys the prompt edits with.
+    pub fn set_prompt_keys(&mut self, keys: Keys) {
+        self.prompt_keys = keys;
+        self.input = Editor::prompt(keys);
+    }
+
     /// Handles a key during a turn. Returns true to stop the turn.
     fn running_key(&mut self, key: KeyEvent) -> bool {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
@@ -521,9 +529,13 @@ impl App {
             return false;
         }
         let empty = self.input.is_empty();
+        let vim = self.prompt_keys == Keys::Vim;
         match key.code {
-            // Esc clears what you are typing first, then stops the turn.
+            // With vim keys, Esc leaves insert mode first. Then, or with plain
+            // keys, it clears what you are typing, and then stops the turn.
+            KeyCode::Esc if vim && !self.input.is_normal_mode() => self.input.key(key),
             KeyCode::Esc if empty => return true,
+            KeyCode::Esc if vim => {}
             KeyCode::Esc => {
                 self.input.set("");
             }
@@ -728,7 +740,13 @@ impl App {
             (None, _) => {
                 let [mark, text] =
                     Layout::horizontal([Constraint::Length(2), Constraint::Fill(1)]).areas(area);
-                f.render_widget(Span::styled("> ", Style::new().fg(Color::Cyan)), mark);
+                // Vim's normal mode shows in the margin.
+                let mark_span = if self.input.is_normal_mode() {
+                    Span::styled("N ", Style::new().fg(Color::Black).bg(Color::Yellow))
+                } else {
+                    Span::styled("> ", Style::new().fg(Color::Cyan))
+                };
+                f.render_widget(mark_span, mark);
                 let focused = !self.notes_focus;
                 self.input.render(f, text, focused);
                 return;
@@ -1119,11 +1137,18 @@ impl App {
                 "while busy, Enter / Alt-Enter",
                 format!("{} / {}", self.busy.name(), alternative(self.busy).name()),
             ),
+            row(
+                "prompt keys",
+                match self.prompt_keys {
+                    Keys::Plain => "plain".into(),
+                    Keys::Vim => "vim".into(),
+                },
+            ),
             row("shell", i.shell.clone()),
             row("layout", LAYOUTS[self.layout].0.to_string()),
             row("context window", format!("{} (assumed)", status::tokens(status::CONTEXT_WINDOW))),
             Line::default(),
-            dim("Read-only for now. Set them with --model or CALX_MODEL, --effort or CALX_EFFORT, --while-busy or CALX_WHILE_BUSY, -y, and CALX_SHELL.").into(),
+            dim("Read-only for now. Set them with --model or CALX_MODEL, --effort or CALX_EFFORT, --while-busy or CALX_WHILE_BUSY, --prompt-keys or CALX_PROMPT_KEYS, -y, and CALX_SHELL.").into(),
         ]
     }
 }
