@@ -3,9 +3,10 @@ use std::io::{BufRead, Write};
 use anyhow::Result;
 use calx_core::agent::Agent;
 use calx_core::auth::{ChatGptAuth, CredentialStore, PendingLogin};
+use calx_core::environment::{Environment, LocalEnvironment};
 use calx_core::message::Event;
 use calx_core::responses::ResponsesClient;
-use calx_core::tools::{Shell, Toolbox};
+use calx_core::tools::Toolbox;
 use clap::{Parser, Subcommand};
 
 const DIM: &str = "\x1b[2m";
@@ -100,28 +101,26 @@ fn logout() -> Result<()> {
     Ok(())
 }
 
-fn system_prompt(shell: &Shell) -> String {
-    let cwd = std::env::current_dir()
-        .map(|p| p.display().to_string())
-        .unwrap_or_default();
+fn system_prompt(env: &dyn Environment) -> String {
     format!(
         "You are calx (Calexandria), Curtis Alexander's personal assistant, running in a terminal.\n\
          Be direct and concise. Format for a terminal: short paragraphs, plain lists, fenced code.\n\
          You can read, write, and edit files and run {} commands with your tools. Use them to \
          check facts about this machine instead of guessing. Read a file before editing it.\n\
-         Operating system: {}. Working directory: {cwd}.",
-        shell.name(),
-        std::env::consts::OS
+         Operating system: {}. Working directory: {}.",
+        env.shell_name(),
+        env.os(),
+        env.working_dir()
     )
 }
 
 async fn chat(cli: &Cli) -> Result<()> {
     let auth = ChatGptAuth::load(CredentialStore::open()?)?;
-    let shell = Shell::detect();
+    let env = LocalEnvironment::current()?;
     let mut agent = Agent {
         client: ResponsesClient::new(auth),
-        system: system_prompt(&shell),
-        toolbox: Toolbox::builtin(shell),
+        system: system_prompt(env.as_ref()),
+        toolbox: Toolbox::builtin(env),
         model: cli.model.clone(),
         effort: (cli.effort != "none").then(|| cli.effort.clone()),
         session_id: calx_core::new_id(),

@@ -4,6 +4,7 @@
 
 pub mod agent;
 pub mod auth;
+pub mod environment;
 pub mod message;
 pub mod responses;
 mod sse;

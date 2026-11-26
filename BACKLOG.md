@@ -31,12 +31,11 @@ everything here, or in this order; the README roadmap is the near-term plan.
 
 ## Where tools run
 
-- **An execution environment boundary.** Today every tool runs on the user's
-  machine as the user: file tools inside the calx process, `shell` as a child
-  process. Put file and process access behind one interface (read, write, list,
-  exec) with a local implementation, so tools can later run in a container, a VM,
-  or over SSH while the harness, its credentials, and its history stay on the
-  trusted side.
+- **More execution environments.** Tools now act only through the `Environment`
+  trait (read, write, list, exec), and `LocalEnvironment` is the only
+  implementation: this machine, as the user. Add a container, VM, or SSH
+  implementation so tools can run away from the harness, its credentials, and
+  its history.
 - **Keep credentials out of the tools' reach.** Credentials are now encrypted
   with a key in the OS keychain. On macOS the Keychain asks before another
   program reads that key, but on Windows and Linux any program running as the

@@ -1,7 +1,8 @@
 //! Tools the model can call.
 //!
 //! A tool runs synchronously on a blocking thread: file and process work is
-//! blocking anyway, and it keeps `Tool` usable as a trait object.
+//! blocking anyway, and it keeps `Tool` usable as a trait object. Tools never
+//! touch the OS directly; they act through an [`Environment`].
 
 mod files;
 mod shell;
@@ -11,7 +12,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use serde_json::Value;
 
-pub use shell::Shell;
+use crate::environment::Environment;
 
 /// What the model is told about a tool.
 #[derive(Debug, Clone)]
@@ -38,14 +39,14 @@ pub struct Toolbox {
 }
 
 impl Toolbox {
-    /// The built-in tools: read, write, edit, and shell.
-    pub fn builtin(shell: Shell) -> Self {
+    /// The built-in tools: read, write, edit, and shell, all acting in `env`.
+    pub fn builtin(env: Arc<dyn Environment>) -> Self {
         Self {
             tools: vec![
-                Arc::new(files::Read),
-                Arc::new(files::Write),
-                Arc::new(files::Edit),
-                Arc::new(shell::ShellTool::new(shell)),
+                Arc::new(files::Read { env: env.clone() }),
+                Arc::new(files::Write { env: env.clone() }),
+                Arc::new(files::Edit { env: env.clone() }),
+                Arc::new(shell::ShellTool { env }),
             ],
         }
     }

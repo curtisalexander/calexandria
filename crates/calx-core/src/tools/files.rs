@@ -1,13 +1,15 @@
-//! File tools: read, write, and edit. Paths are relative to the working directory.
+//! File tools: read, write, and edit, done through the execution environment.
+//! Paths are relative to its working directory.
 
 use std::fmt::Write as _;
-use std::path::Path;
+use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::{Tool, ToolSpec, parse_args, truncate_middle};
+use crate::environment::Environment;
 
 const MAX_READ_LINES: usize = 2000;
 const MAX_OUTPUT_BYTES: usize = 50_000;
@@ -16,7 +18,9 @@ fn path_summary(args: &Value) -> String {
     args["path"].as_str().unwrap_or("?").to_string()
 }
 
-pub struct Read;
+pub struct Read {
+    pub env: Arc<dyn Environment>,
+}
 
 #[derive(Deserialize)]
 struct ReadArgs {
@@ -55,25 +59,15 @@ impl Tool for Read {
 
     fn run(&self, args: Value) -> Result<String> {
         let a: ReadArgs = parse_args(args)?;
-        let path = Path::new(&a.path);
-        if path.is_dir() {
-            let mut names: Vec<String> = std::fs::read_dir(path)
-                .with_context(|| format!("could not list {}", a.path))?
-                .filter_map(|e| e.ok())
-                .map(|e| {
-                    let name = e.file_name().to_string_lossy().into_owned();
-                    if e.path().is_dir() { name + "/" } else { name }
-                })
-                .collect();
-            names.sort();
+        if self.env.is_dir(&a.path) {
+            let names = self.env.list_dir(&a.path)?;
             return Ok(if names.is_empty() {
                 "(empty directory)".into()
             } else {
                 names.join("\n")
             });
         }
-        let text =
-            std::fs::read_to_string(path).with_context(|| format!("could not read {}", a.path))?;
+        let text = self.env.read_file(&a.path)?;
         let lines: Vec<&str> = text.lines().collect();
         if lines.is_empty() {
             return Ok("(empty file)".into());
@@ -103,7 +97,9 @@ impl Tool for Read {
     }
 }
 
-pub struct Write;
+pub struct Write {
+    pub env: Arc<dyn Environment>,
+}
 
 #[derive(Deserialize)]
 struct WriteArgs {
@@ -139,17 +135,14 @@ impl Tool for Write {
 
     fn run(&self, args: Value) -> Result<String> {
         let a: WriteArgs = parse_args(args)?;
-        let path = Path::new(&a.path);
-        if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
-            std::fs::create_dir_all(dir)
-                .with_context(|| format!("could not create {}", dir.display()))?;
-        }
-        std::fs::write(path, &a.content).with_context(|| format!("could not write {}", a.path))?;
+        self.env.write_file(&a.path, &a.content)?;
         Ok(format!("Wrote {} bytes to {}", a.content.len(), a.path))
     }
 }
 
-pub struct Edit;
+pub struct Edit {
+    pub env: Arc<dyn Environment>,
+}
 
 #[derive(Deserialize)]
 struct EditArgs {
@@ -187,11 +180,10 @@ impl Tool for Edit {
 
     fn run(&self, args: Value) -> Result<String> {
         let a: EditArgs = parse_args(args)?;
-        let text = std::fs::read_to_string(&a.path)
-            .with_context(|| format!("could not read {}", a.path))?;
+        let text = self.env.read_file(&a.path)?;
         let updated = replace_once(&text, &a.old_text, &a.new_text)
             .with_context(|| format!("could not edit {}", a.path))?;
-        std::fs::write(&a.path, updated).with_context(|| format!("could not write {}", a.path))?;
+        self.env.write_file(&a.path, &updated)?;
         Ok(format!("Edited {}", a.path))
     }
 }
