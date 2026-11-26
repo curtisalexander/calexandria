@@ -40,11 +40,30 @@ everything here, or in this order; the README roadmap is the near-term plan.
 - **Keep credentials out of the tools' reach.** The `shell` tool can read
   `~/.calx/auth.json` today. Options: OS keychain storage, a scrubbed environment
   for child processes, or tools that run in a separate environment.
-- **Codemode** ([Armin Ronacher's post](https://lucumr.pocoo.org/2026/10/6/codemode/)).
-  A sandboxed script runtime inside the harness (QuickJS, or Starlark for
-  deterministic replay) where the model composes many tool calls, MCP calls,
-  and harness-only calls (other models, subagents, images) without each result
-  passing through its context. Worth it once there are MCP servers or harness
-  APIs to orchestrate.
+- **Codemode** ([Armin Ronacher's post](https://lucumr.pocoo.org/2026/10/6/codemode/),
+  [Cloudflare's original](https://blog.cloudflare.com/code-mode/)). A sandboxed
+  script runtime inside the harness where the model writes a short program that
+  calls tools, MCP tools, and harness-only APIs (other models, subagents, images,
+  stored values) without each intermediate result passing through its context.
+  The script has no file system, network, or clock of its own: its only effects
+  are tool calls, which go through the same approval rules as direct calls.
+
+  The language is open. Candidates, all embeddable in Rust:
+  - **Starlark** (the `starlark` crate, from Buck2). Python-like, so models and
+    Curtis both read it easily. Hermetic and deterministic by design, so a run
+    can be recorded (tool results) and replayed exactly, which suits sessions,
+    compaction, and evals. Gaps: no async, so the harness must offer a builtin
+    such as `parallel(fn, items)`; no `while`, exceptions, or classes, so models
+    that write full Python will hit errors and need clear messages back.
+  - **JavaScript via QuickJS** (`rquickjs`), what Pi uses. Models write it most
+    fluently, and `Promise.all` makes concurrency natural. Not deterministic
+    without extra work.
+  - **A Python subset interpreter** written for agents. Worth checking what
+    exists when we get here.
+  - Lua (`mlua`) or Rhai: easy to embed, but models know them less well.
+
+  Decide when there are MCP servers or harness-only APIs to orchestrate; until
+  then, `shell` already lets the model compose programs. Whatever the language,
+  cap concurrent tool calls (Pi uses four), memory, and run time.
 - **Parallel tool calls.** The model can already request several at once; calx
   runs them one after another.
