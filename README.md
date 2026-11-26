@@ -66,3 +66,6 @@ Your sign-in is saved in `~/.calx/auth.json`, readable only by you.
    API keys, and a configurable OAuth flow for work.
 4. A terminal UI.
 5. Memory, and extensions written in Python.
+
+Longer-term ideas, such as compaction and where tools run, are in
+[BACKLOG.md](BACKLOG.md).
