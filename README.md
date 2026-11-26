@@ -47,10 +47,16 @@ into the terminal instead.
 | Model | `-m`, `--model` | `CALX_MODEL` | `gpt-6.2-sol` |
 | Reasoning effort | `--effort` | `CALX_EFFORT` | `medium` |
 | Shell for the `shell` tool | | `CALX_SHELL` | bash, else PowerShell |
+| Encryption key, instead of the keychain | | `CALX_AUTH_KEY` | |
 | State directory | | `CALX_HOME` | `~/.calx` |
 | Responses API base URL | | `CALX_OPENAI_BASE_URL` | `https://api.openai.com/v1` |
 
-Your sign-in is saved in `~/.calx/auth.json`, readable only by you.
+Your sign-in is saved encrypted in `~/.calx/auth.json`. The key is in your OS
+keychain: macOS Keychain, Windows Credential Manager, or the Linux Secret Service
+(GNOME Keyring or KWallet). On a machine without a keychain, such as a headless
+Linux server, set `CALX_AUTH_KEY` to a base64 string of 32 random bytes
+(`openssl rand -base64 32`) and keep it as safe as a password. On macOS, expect
+the Keychain to ask once after each update whether calx may use its key.
 
 ## Layout
 

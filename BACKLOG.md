@@ -37,9 +37,11 @@ everything here, or in this order; the README roadmap is the near-term plan.
   exec) with a local implementation, so tools can later run in a container, a VM,
   or over SSH while the harness, its credentials, and its history stay on the
   trusted side.
-- **Keep credentials out of the tools' reach.** The `shell` tool can read
-  `~/.calx/auth.json` today. Options: OS keychain storage, a scrubbed environment
-  for child processes, or tools that run in a separate environment.
+- **Keep credentials out of the tools' reach.** Credentials are now encrypted
+  with a key in the OS keychain. On macOS the Keychain asks before another
+  program reads that key, but on Windows and Linux any program running as the
+  user can, including a command the `shell` tool runs. Full protection needs
+  tools that run in a separate environment.
 - **Codemode** ([Armin Ronacher's post](https://lucumr.pocoo.org/2026/10/6/codemode/),
   [Cloudflare's original](https://blog.cloudflare.com/code-mode/)). A sandboxed
   script runtime inside the harness where the model writes a short program that

@@ -5,7 +5,6 @@
 //! issued client ID with the authorization code). The access token then works
 //! as a bearer token for the public Responses API at api.openai.com.
 
-use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -17,6 +16,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex, mpsc};
 use url::Url;
+
+pub use crate::store::CredentialStore;
 
 const DEFAULT_AUTH_BASE_URL: &str = "https://auth.openai.com";
 const RESOURCE: &str = "https://api.openai.com/v1";
@@ -66,70 +67,6 @@ pub struct Credential {
     pub client_id: String,
 }
 
-/// Where credentials live: `auth.json` in the calx home directory.
-#[derive(Debug, Clone)]
-pub struct CredentialStore {
-    path: PathBuf,
-}
-
-#[derive(Default, Serialize, Deserialize)]
-struct AuthFile {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    chatgpt: Option<Credential>,
-}
-
-impl CredentialStore {
-    pub fn open() -> Result<Self> {
-        Ok(Self {
-            path: crate::calx_home()?.join("auth.json"),
-        })
-    }
-
-    pub fn path(&self) -> &PathBuf {
-        &self.path
-    }
-
-    pub fn load(&self) -> Result<Option<Credential>> {
-        match std::fs::read_to_string(&self.path) {
-            Ok(text) => {
-                let file: AuthFile = serde_json::from_str(&text)
-                    .with_context(|| format!("could not parse {}", self.path.display()))?;
-                Ok(file.chatgpt)
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(e).with_context(|| format!("could not read {}", self.path.display())),
-        }
-    }
-
-    pub fn save(&self, credential: Option<&Credential>) -> Result<()> {
-        let file = AuthFile {
-            chatgpt: credential.cloned(),
-        };
-        write_private(&self.path, &serde_json::to_string_pretty(&file)?)
-    }
-}
-
-/// Writes a file only the current user can read (on Unix; Windows profile
-/// directories are already private to the user).
-fn write_private(path: &PathBuf, contents: &str) -> Result<()> {
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    use std::io::Write;
-    let mut file = options
-        .open(path)
-        .with_context(|| format!("could not write {}", path.display()))?;
-    file.write_all(contents.as_bytes())?;
-    Ok(())
-}
-
 /// A stable ID for this install, which OpenAI uses to tell one agent host from another.
 fn device_id() -> Result<String> {
     let path = crate::calx_home()?.join("device_id");
@@ -139,7 +76,7 @@ fn device_id() -> Result<String> {
         return Ok(id.trim().to_string());
     }
     let id = uuid::Uuid::new_v4().to_string();
-    write_private(&path, &id)?;
+    crate::write_private(&path, &id)?;
     Ok(id)
 }
 

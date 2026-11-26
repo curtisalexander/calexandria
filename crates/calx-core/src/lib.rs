@@ -7,9 +7,10 @@ pub mod auth;
 pub mod message;
 pub mod responses;
 mod sse;
+pub mod store;
 pub mod tools;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
@@ -25,4 +26,29 @@ pub fn calx_home() -> Result<PathBuf> {
 /// A new random ID, such as for a session.
 pub fn new_id() -> String {
     uuid::Uuid::new_v4().to_string()
+}
+
+/// Writes a file only the current user can read (on Unix; Windows profile
+/// directories are already private to the user). It writes a temporary file
+/// and renames it into place, so a crash never leaves a half-written file.
+pub(crate) fn write_private(path: &Path, contents: &str) -> Result<()> {
+    use std::io::Write;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let tmp = path.with_extension("tmp");
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(&tmp)
+        .with_context(|| format!("could not write {}", tmp.display()))?;
+    file.write_all(contents.as_bytes())?;
+    file.sync_all()?;
+    drop(file);
+    std::fs::rename(&tmp, path).with_context(|| format!("could not write {}", path.display()))
 }

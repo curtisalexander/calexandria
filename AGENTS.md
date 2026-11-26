@@ -23,6 +23,7 @@ cargo test
 
 Build and smoke-test the wheel: `uv tool install --force . && calx --version`.
 
-`CALX_HOME`, `CALX_AUTH_BASE_URL`, and `CALX_OPENAI_BASE_URL` point calx at a
-scratch directory and test servers, so login and streaming can be exercised
+`CALX_HOME`, `CALX_AUTH_KEY`, `CALX_AUTH_BASE_URL`, and `CALX_OPENAI_BASE_URL`
+point calx at a scratch directory, a key that bypasses the OS keychain, and test
+servers, so login and streaming can be exercised
 without a real account.
