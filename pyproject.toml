@@ -1,0 +1,17 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "calexandria"
+dynamic = ["version"]
+description = "Calexandria, a personal agent harness (command: calx)"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.9"
+
+[tool.maturin]
+bindings = "bin"
+manifest-path = "crates/calx/Cargo.toml"
+module-name = "calexandria"
+python-source = "python"

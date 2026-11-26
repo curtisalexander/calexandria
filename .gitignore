@@ -1,0 +1,12 @@
+# Rust
+/target/
+
+# Python
+__pycache__/
+*.py[cod]
+dist/
+*.whl
+.venv/
+
+# OS
+.DS_Store
