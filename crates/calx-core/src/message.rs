@@ -46,21 +46,53 @@ pub struct ToolCall {
 }
 
 /// What the agent reports while it works.
+///
+/// `seq` numbers an item by its place in the conversation, counting from 1,
+/// the same number the session store gives it. The UI shows it as `§seq`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
+    /// A model request is about to be sent with the first `items` items.
+    RequestStarted { step: usize, items: usize },
     /// Part of the model's summary of its reasoning.
     ReasoningDelta(String),
     /// Part of the reply text.
     TextDelta(String),
-    /// A tool is about to run; `summary` is one line such as the command or path.
-    ToolStarted { name: String, summary: String },
+    /// A model request finished.
+    RequestFinished { usage: Usage, duration_ms: u64 },
+    /// A tool call is starting, before any approval; `seq` is the call's
+    /// item. `summary` is one line such as the command or path.
+    ToolStarted {
+        seq: usize,
+        name: String,
+        summary: String,
+        exposure: Exposure,
+    },
+    /// A tool finished, or was declined; `seq` is its call's, as in `ToolStarted`.
     ToolFinished {
+        seq: usize,
         name: String,
         output: String,
         is_error: bool,
+        duration_ms: u64,
     },
-    /// Tokens used by one model request.
-    Usage(Usage),
+}
+
+/// Which legs of the lethal trifecta a tool opens: access to private data,
+/// exposure to untrusted content, and a way to send data out. An agent with
+/// all three can be tricked into leaking what it can read.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Exposure {
+    pub private: bool,
+    pub untrusted: bool,
+    pub egress: bool,
+}
+
+impl std::ops::BitOrAssign for Exposure {
+    fn bitor_assign(&mut self, other: Self) {
+        self.private |= other.private;
+        self.untrusted |= other.untrusted;
+        self.egress |= other.egress;
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

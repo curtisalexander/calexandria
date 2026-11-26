@@ -16,7 +16,16 @@ Early. Today calx can:
   summary of the model's reasoning, and calls tools until the task is done.
 - **Tools:** `read` (files and directories), `write`, `edit` (exact text
   replacement), and `shell` (bash, which is Git Bash on Windows, otherwise
-  PowerShell). calx asks before each `write`, `edit`, and `shell`; `-y` skips that.
+  PowerShell). calx asks before each `write`, `edit`, and `shell`, showing a
+  diff for edits; `-y` skips that.
+- **Two views.** *Marginalia*, the default, is plain scrolling output: each item
+  is numbered in the left margin (`§16`), tool times are in the right margin,
+  and a status line after each turn shows context use, cache hits, and which
+  legs of the lethal trifecta the session has opened. *Carrels* (`calx -p`, or
+  `/panels` in a conversation) is a full-screen view with tiles for the
+  conversation, the pending diff, the tool log, stats, context use, calx itself,
+  and its settings. It needs 140 columns; narrower terminals get the *Reading
+  room*, the conversation plus one side panel.
 
 ## Install
 
@@ -36,10 +45,16 @@ calx                             # start a conversation; /exit to quit
 calx -m gpt-6.2-astra --effort high
 calx -y "run the tests and fix what fails"   # no approval prompts
 calx sessions                    # list recent sessions
+calx -p                          # the panel view; -c -p resumes into it
 calx -c                          # continue the latest session in this directory
 calx -r 4f02f1ac "and then?"     # resume a session by the start of its ID
 calx logout
 ```
+
+In the panel view, Tab switches the side panel, Ctrl-L switches layouts
+(coding, research, inspect), PgUp and PgDn scroll, Esc stops a running turn,
+and Ctrl-D quits. When calx asks to run a tool, answer `y` yes, `n` no, `a`
+always for that tool this session, or `?` for why it asks.
 
 Every conversation is saved to `~/.calx/sessions.db` (SQLite) after each turn,
 including what the tools read, so treat it as private as your files.
@@ -67,15 +82,17 @@ the Keychain to ask once after each update whether calx may use its key.
 ## Layout
 
 - `crates/calx-core`: the harness itself: auth, providers, message types.
-- `crates/calx`: the `calx` command-line program, a thin frontend over the core.
+- `crates/calx`: the `calx` command-line program, a thin frontend over the core,
+  with its two views (`marginalia.rs`, `carrels.rs`).
 - `python/calexandria`: the Python package that ships the binary (built with maturin).
 
 ## Roadmap
 
-1. More tools (search, find files), cancelling a running turn, and approval rules.
+1. More tools (search, find files) and saved approval rules.
 2. More model backends: Chat Completions (local MLX, Ollama, work gateways),
    API keys, and a configurable OAuth flow for work.
-3. A terminal UI.
+3. Terminal UI next steps: a Trace view of every request in a turn, editable
+   Prefs, and multi-line input.
 4. Memory, and extensions written in Python.
 
 Longer-term ideas, such as compaction and where tools run, are in

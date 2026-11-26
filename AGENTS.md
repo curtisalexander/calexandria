@@ -15,6 +15,10 @@ never pip. It must run on Windows, macOS, and Linux.
   and process work through the `Environment` trait, never `std::fs` or
   `std::process` directly, so they can later run in a container, VM, or over SSH
   while the harness and its credentials stay put.
+- `crates/calx`: the CLI and its views. `marginalia.rs` is the plain scrolling
+  view, `carrels.rs` the full-screen ratatui view, and `status.rs` what both
+  report. Views learn what the agent does only from `Event`s and `Approval`s;
+  when a view needs more, add an event in the core rather than reaching into it.
 - `crates/calx-core/src/store.rs`: secrets, encrypted with a key in the OS keychain.
 - `crates/calx-core/src/session.rs`: sessions in SQLite (`sessions.db`), an
   append-only list of items per session numbered from 1. Never rewrite saved

@@ -1,17 +1,20 @@
-use std::io::{BufRead, Write};
+mod carrels;
+mod marginalia;
+mod status;
+
+use std::io::BufRead;
 
 use anyhow::{Context, Result};
 use calx_core::agent::Agent;
 use calx_core::auth::{ChatGptAuth, CredentialStore, PendingLogin};
 use calx_core::environment::{Environment, LocalEnvironment};
-use calx_core::message::Event;
 use calx_core::responses::ResponsesClient;
 use calx_core::session::Sessions;
 use calx_core::tools::Toolbox;
 use clap::{Parser, Subcommand};
+use marginalia::one_line;
 
 const DIM: &str = "\x1b[2m";
-const BOLD: &str = "\x1b[1m";
 const RED: &str = "\x1b[31m";
 const RESET: &str = "\x1b[0m";
 
@@ -44,6 +47,10 @@ struct Cli {
     /// Resume a session by its ID, or the start of it; see `calx sessions`.
     #[arg(long, short = 'r', value_name = "ID")]
     resume: Option<String>,
+
+    /// Start in the panel view instead of plain scrolling output.
+    #[arg(long, short = 'p', conflicts_with = "prompt")]
+    panels: bool,
 }
 
 #[derive(Subcommand)]
@@ -167,6 +174,7 @@ async fn chat(cli: &Cli) -> Result<()> {
     let auth = ChatGptAuth::load(CredentialStore::open()?)?;
     let env = LocalEnvironment::current()?;
     let cwd = env.working_dir();
+    let shell = env.shell_name().to_string();
     let sessions = Sessions::open()?;
     let resumed =
         match (&cli.resume, cli.continue_latest) {
@@ -200,128 +208,35 @@ async fn chat(cli: &Cli) -> Result<()> {
             eprintln!("{RED}warning:{RESET} could not save the session: {e:#}");
         }
     };
-    let short_id = agent.session_id[..8].to_string();
-    if !agent.items.is_empty() {
+    if !agent.items.is_empty() && !cli.panels {
         println!(
-            "{DIM}Resumed session {short_id} ({} items).{RESET}",
+            "{DIM}Resumed session {} ({} items).{RESET}",
+            &agent.session_id[..8],
             agent.items.len()
         );
     }
 
+    let mut simple = marginalia::Marginalia {
+        yes: cli.yes,
+        always: Default::default(),
+        tally: status::Tally::new(&agent),
+    };
     if !cli.prompt.is_empty() {
         let before = agent.items.len();
-        turn(&mut agent, &cli.prompt.join(" "), cli.yes).await?;
+        simple.turn(&mut agent, &cli.prompt.join(" ")).await?;
         save(&agent, before);
         return Ok(());
     }
-
-    println!(
-        "{DIM}calx · {} · session {short_id} · /exit to quit{RESET}",
-        cli.model
-    );
-    loop {
-        print!("\n> ");
-        std::io::stdout().flush()?;
-        let Some(line) = read_line()? else { break };
-        let line = line.trim();
-        match line {
-            "" => continue,
-            "/exit" | "/quit" => break,
-            _ => {}
-        }
-        let before = agent.items.len();
-        match turn(&mut agent, line, cli.yes).await {
-            Ok(()) => save(&agent, before),
-            Err(e) => {
-                // Drop the failed turn so the next one starts from a valid conversation.
-                agent.items.truncate(before);
-                eprintln!("\n{RED}error:{RESET} {e:#}");
-            }
-        }
+    let panels = cli.panels
+        || matches!(
+            simple.converse(&mut agent, &save).await?,
+            marginalia::Exit::Panels
+        );
+    if panels {
+        let info = carrels::Info::new(&agent, &shell, &cwd);
+        let mut app = carrels::App::new(&agent, info, cli.yes, std::mem::take(&mut simple.tally));
+        app.always = simple.always;
+        carrels::run(app, &mut agent, &save).await?;
     }
     Ok(())
-}
-
-fn read_line() -> Result<Option<String>> {
-    let mut line = String::new();
-    Ok((std::io::stdin().lock().read_line(&mut line)? > 0).then_some(line))
-}
-
-/// Runs one prompt, printing the reply and tool activity as it happens.
-async fn turn(agent: &mut Agent, prompt: &str, yes: bool) -> Result<()> {
-    let mut out = std::io::stdout();
-    let mut in_reasoning = false;
-    let mut total = calx_core::message::Usage::default();
-    let mut on_event = |event: Event| {
-        let end_reasoning = |out: &mut std::io::Stdout, in_reasoning: &mut bool| {
-            if *in_reasoning {
-                *in_reasoning = false;
-                let _ = write!(out, "{RESET}\n\n");
-            }
-        };
-        match event {
-            Event::ReasoningDelta(delta) => {
-                if !in_reasoning {
-                    in_reasoning = true;
-                    let _ = write!(out, "{DIM}");
-                }
-                let _ = write!(out, "{delta}");
-            }
-            Event::TextDelta(delta) => {
-                end_reasoning(&mut out, &mut in_reasoning);
-                let _ = write!(out, "{delta}");
-            }
-            Event::ToolStarted { name, summary } => {
-                end_reasoning(&mut out, &mut in_reasoning);
-                let _ = writeln!(out, "{BOLD}▸ {name}{RESET} {}", one_line(&summary, 200));
-            }
-            Event::ToolFinished {
-                output, is_error, ..
-            } => {
-                let color = if is_error { RED } else { DIM };
-                let lines: Vec<&str> = output.lines().collect();
-                for line in lines.iter().take(4) {
-                    let _ = writeln!(out, "  {color}{}{RESET}", one_line(line, 160));
-                }
-                if lines.len() > 4 {
-                    let _ = writeln!(out, "  {DIM}… {} more lines{RESET}", lines.len() - 4);
-                }
-            }
-            Event::Usage(u) => total += u,
-        }
-        let _ = out.flush();
-    };
-    let mut approve = |name: &str, _summary: &str| {
-        if yes {
-            return true;
-        }
-        print!("  {BOLD}Run {name}?{RESET} [y/N] ");
-        let _ = std::io::stdout().flush();
-        matches!(read_line(), Ok(Some(answer)) if matches!(answer.trim().to_lowercase().as_str(), "y" | "yes"))
-    };
-    let result = agent.run(prompt, &mut on_event, &mut approve).await;
-    // Output errors are ignored, as above: a closed pipe (`calx ... | head`)
-    // must not panic before the caller saves the turn.
-    let mut out = std::io::stdout();
-    if in_reasoning {
-        let _ = write!(out, "{RESET}");
-    }
-    result?;
-    let _ = writeln!(
-        out,
-        "\n{DIM}[{} in, {} cached · {} out]{RESET}",
-        total.input_tokens, total.cached_input_tokens, total.output_tokens
-    );
-    Ok(())
-}
-
-/// Shortens text to one line of at most `max` characters for display.
-fn one_line(text: &str, max: usize) -> String {
-    let first = text.lines().next().unwrap_or_default();
-    let more = text.lines().nth(1).is_some();
-    let mut s: String = first.chars().take(max).collect();
-    if more || first.chars().count() > max {
-        s.push('…');
-    }
-    s
 }

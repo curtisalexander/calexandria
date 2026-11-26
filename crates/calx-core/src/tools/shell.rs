@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 
 use super::{Tool, ToolSpec, parse_args, truncate_middle};
 use crate::environment::{Environment, Exit};
+use crate::message::Exposure;
 
 const DEFAULT_TIMEOUT_SECS: u64 = 120;
 const MAX_OUTPUT_BYTES: usize = 30_000;
@@ -48,6 +49,15 @@ impl Tool for ShellTool {
 
     fn needs_approval(&self) -> bool {
         true
+    }
+
+    fn exposure(&self) -> Exposure {
+        // A command can read anything, fetch anything, and send anything.
+        Exposure {
+            private: true,
+            untrusted: true,
+            egress: true,
+        }
     }
 
     fn summary(&self, args: &Value) -> String {

@@ -124,7 +124,6 @@ impl ResponsesClient {
                     "response.completed" => {
                         completed = true;
                         reply.usage = usage(&event["response"]["usage"]);
-                        on_event(Event::Usage(reply.usage));
                     }
                     "response.incomplete" => {
                         let reason = event["response"]["incomplete_details"]["reason"]

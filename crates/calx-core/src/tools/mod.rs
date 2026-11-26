@@ -13,6 +13,7 @@ use anyhow::Result;
 use serde_json::Value;
 
 use crate::environment::Environment;
+use crate::message::Exposure;
 
 /// What the model is told about a tool.
 #[derive(Debug, Clone)]
@@ -29,6 +30,15 @@ pub trait Tool: Send + Sync {
     fn needs_approval(&self) -> bool;
     /// One line for the user, such as the path or the command.
     fn summary(&self, args: &Value) -> String;
+    /// What the call would change, shown to the user before they approve it,
+    /// such as a diff.
+    fn preview(&self, _args: &Value) -> Option<String> {
+        None
+    }
+    /// Which legs of the lethal trifecta this tool opens.
+    fn exposure(&self) -> Exposure {
+        Exposure::default()
+    }
     fn run(&self, args: Value) -> Result<String>;
 }
 

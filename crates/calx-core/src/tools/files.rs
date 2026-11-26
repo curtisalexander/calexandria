@@ -10,6 +10,7 @@ use serde_json::{Value, json};
 
 use super::{Tool, ToolSpec, parse_args, truncate_middle};
 use crate::environment::Environment;
+use crate::message::Exposure;
 
 const MAX_READ_LINES: usize = 2000;
 const MAX_OUTPUT_BYTES: usize = 50_000;
@@ -51,6 +52,16 @@ impl Tool for Read {
 
     fn needs_approval(&self) -> bool {
         false
+    }
+
+    fn exposure(&self) -> Exposure {
+        // Files hold private data, and a file someone else wrote, such as one
+        // in a cloned repository, can carry instructions aimed at the model.
+        Exposure {
+            private: true,
+            untrusted: true,
+            egress: false,
+        }
     }
 
     fn summary(&self, args: &Value) -> String {
@@ -133,6 +144,13 @@ impl Tool for Write {
         path_summary(args)
     }
 
+    fn preview(&self, args: &Value) -> Option<String> {
+        let content = args["content"].as_str()?;
+        let path = args["path"].as_str()?;
+        let old = self.env.read_file(path).ok();
+        Some(write_preview(old.as_deref(), content))
+    }
+
     fn run(&self, args: Value) -> Result<String> {
         let a: WriteArgs = parse_args(args)?;
         self.env.write_file(&a.path, &a.content)?;
@@ -178,6 +196,13 @@ impl Tool for Edit {
         path_summary(args)
     }
 
+    fn preview(&self, args: &Value) -> Option<String> {
+        let old = args["old_text"].as_str()?;
+        let new = args["new_text"].as_str()?;
+        let text = self.env.read_file(args["path"].as_str()?).ok();
+        Some(edit_preview(text.as_deref(), old, new))
+    }
+
     fn run(&self, args: Value) -> Result<String> {
         let a: EditArgs = parse_args(args)?;
         let text = self.env.read_file(&a.path)?;
@@ -185,6 +210,44 @@ impl Tool for Edit {
             .with_context(|| format!("could not edit {}", a.path))?;
         self.env.write_file(&a.path, &updated)?;
         Ok(format!("Edited {}", a.path))
+    }
+}
+
+/// Most lines a preview shows of each side of a change.
+const PREVIEW_LINES: usize = 40;
+
+/// A diff of one edit: the removed lines, then the added ones, headed by the
+/// line number where they start when the file is readable and has the text.
+fn edit_preview(text: Option<&str>, old: &str, new: &str) -> String {
+    let mut out = String::new();
+    if let Some(at) = text.and_then(|t| t.find(old).map(|i| &t[..i])) {
+        let _ = writeln!(out, "@@ line {} @@", at.matches('\n').count() + 1);
+    }
+    push_lines(&mut out, '-', old);
+    push_lines(&mut out, '+', new);
+    out
+}
+
+/// A preview of a write: the new contents, marked as replacing any old ones.
+fn write_preview(old: Option<&str>, content: &str) -> String {
+    let mut out = String::new();
+    match old {
+        Some(old) => {
+            let _ = writeln!(out, "@@ replaces all {} lines @@", old.lines().count());
+        }
+        None => out.push_str("@@ new file @@\n"),
+    }
+    push_lines(&mut out, '+', content);
+    out
+}
+
+fn push_lines(out: &mut String, mark: char, text: &str) {
+    let lines: Vec<&str> = text.lines().collect();
+    for line in lines.iter().take(PREVIEW_LINES) {
+        let _ = writeln!(out, "{mark}{line}");
+    }
+    if lines.len() > PREVIEW_LINES {
+        let _ = writeln!(out, "… {} more lines", lines.len() - PREVIEW_LINES);
     }
 }
 
@@ -210,6 +273,20 @@ fn replace_once(text: &str, old: &str, new: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn edit_preview_numbers_the_line_the_match_starts_on() {
+        let text = "one\ntwo\nthree three\n";
+        assert_eq!(
+            edit_preview(Some(text), "three\n", "3\n"),
+            "@@ line 3 @@\n-three\n+3\n"
+        );
+        assert_eq!(
+            edit_preview(Some(text), "one", "1"),
+            "@@ line 1 @@\n-one\n+1\n"
+        );
+        assert_eq!(edit_preview(None, "a\nb", ""), "-a\n-b\n");
+    }
 
     #[test]
     fn replace_once_matches_lf_text_in_a_crlf_file() {
