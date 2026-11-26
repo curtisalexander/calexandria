@@ -51,6 +51,16 @@ calx -r 4f02f1ac "and then?"     # resume a session by the start of its ID
 calx logout
 ```
 
+You can type while calx works. By default a message *steers*: calx reads it
+at the next pause in the turn (after the current request or tool), skips the
+tool calls still waiting in that batch, and goes on with your message in mind.
+`--while-busy queue` (or `CALX_WHILE_BUSY=queue`) sends it as a new prompt after
+the turn instead, and `--while-busy stop` stops the turn and sends it. In the
+plain view, `/steer`, `/queue`, or `/stop` before a message picks for that one
+line, and answering an approval with a message instead of `y` or `n` declines
+the call and steers. In the panel view, Alt-Enter does the other of steer and
+queue, and Ctrl-U with an empty prompt takes back the last message not yet read.
+
 In the panel view, Tab switches the side panel, Ctrl-L switches layouts
 (coding, research, inspect), PgUp and PgDn scroll, Esc stops a running turn,
 and Ctrl-D quits. Ctrl-N opens a Notes aside, a scratchpad saved to
@@ -70,6 +80,7 @@ into the terminal instead.
 |---|---|---|---|
 | Model | `-m`, `--model` | `CALX_MODEL` | `gpt-6.2-sol` |
 | Reasoning effort | `--effort` | `CALX_EFFORT` | `medium` |
+| Typing while calx works | `--while-busy` | `CALX_WHILE_BUSY` | `steer` (or `queue`, `stop`) |
 | Shell for the `shell` tool | | `CALX_SHELL` | bash, else PowerShell |
 | Encryption key, instead of the keychain | | `CALX_AUTH_KEY` | |
 | State directory | | `CALX_HOME` | `~/.calx` |

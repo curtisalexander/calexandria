@@ -49,6 +49,11 @@ struct Cli {
     #[arg(long, short = 'r', value_name = "ID")]
     resume: Option<String>,
 
+    /// What a prompt sent while calx is working does: steer the running turn
+    /// at its next pause, queue it for after the turn, or stop the turn and send it.
+    #[arg(long, env = "CALX_WHILE_BUSY", value_enum, default_value_t = status::Busy::Steer)]
+    while_busy: status::Busy,
+
     /// Start in the panel view instead of plain scrolling output.
     #[arg(long, short = 'p', conflicts_with = "prompt")]
     panels: bool,
@@ -217,15 +222,13 @@ async fn chat(cli: &Cli) -> Result<()> {
         );
     }
 
-    let mut simple = marginalia::Marginalia {
-        yes: cli.yes,
-        always: Default::default(),
-        tally: status::Tally::new(&agent),
-    };
+    let mut simple =
+        marginalia::Marginalia::new(cli.yes, status::Tally::new(&agent), cli.while_busy);
     if !cli.prompt.is_empty() {
         let before = agent.items.len();
-        simple.turn(&mut agent, &cli.prompt.join(" ")).await?;
-        save(&agent, before);
+        if simple.turn(&mut agent, &cli.prompt.join(" ")).await? {
+            save(&agent, before);
+        }
         return Ok(());
     }
     let panels = cli.panels
@@ -237,6 +240,7 @@ async fn chat(cli: &Cli) -> Result<()> {
         let info = carrels::Info::new(&agent, &shell, &cwd);
         let mut app = carrels::App::new(&agent, info, cli.yes, std::mem::take(&mut simple.tally));
         app.always = simple.always;
+        app.busy = cli.while_busy;
         carrels::run(app, &mut agent, &save).await?;
     }
     Ok(())

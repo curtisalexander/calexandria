@@ -75,3 +75,12 @@ everything here, or in this order; the README roadmap is the near-term plan.
   locally where possible (for example Whisper through MLX on macOS) so audio
   never leaves the machine, with a hosted transcription API as the fallback.
   Show the transcript for editing before it is sent.
+- **Vim keys in the Notes aside.** Today the notes only append and backspace.
+  Options, cheapest last:
+  - embed an editor widget with vim modes, such as `edtui` (vim modes and
+    motions built in) or `tui-textarea` (has a vim-style example to build on),
+    after checking it supports calx's ratatui version;
+  - a small modal layer of our own covering the motions actually used
+    (`hjkl`, `w`/`b`, `0`/`$`, `gg`/`G`, `dd`, `x`, `i`/`a`/`o`, `u`);
+  - a key that opens `notes.md` in `$EDITOR` and returns when it exits: all of
+    real vim, but it takes over the screen while you edit.

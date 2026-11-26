@@ -17,6 +17,10 @@ pub const MAX_STEPS: usize = 100;
 pub const DECLINED: &str =
     "The user declined to run this. Ask them how to proceed instead of retrying it.";
 
+/// The result a call gets when the user sent a message before it ran.
+pub const SKIPPED: &str =
+    "Skipped: the user sent a message before this ran. Read it before calling tools again.";
+
 pub struct Agent {
     pub client: ResponsesClient,
     pub toolbox: Toolbox,
@@ -46,6 +50,13 @@ impl Agent {
     /// `approve` is awaited before each tool that needs approval runs. It is
     /// async so a full-screen UI can keep drawing while the user decides.
     ///
+    /// `steer` hands over messages the user sent while the turn runs. They
+    /// are read at each pause: before each tool call, and after a reply. Once
+    /// there are any, the calls still waiting in that batch are skipped, and
+    /// the messages are added as user items before the next request, so the
+    /// model reads them before it goes on. A message that arrives during the
+    /// final reply keeps the turn going.
+    ///
     /// Dropping the returned future cancels the turn; the caller then drops
     /// the items it added, as for an error. A tool already running on its
     /// blocking thread still finishes in the background.
@@ -54,6 +65,7 @@ impl Agent {
         prompt: &str,
         on_event: &mut dyn FnMut(Event),
         approve: &mut impl AsyncFnMut(Approval) -> bool,
+        steer: &mut dyn FnMut() -> Vec<String>,
     ) -> Result<String> {
         self.items.push(Item::User {
             text: prompt.to_string(),
@@ -89,16 +101,32 @@ impl Agent {
                 }
             }
             self.items.extend(reply.items);
+            let mut steering = Vec::new();
             if calls.is_empty() {
-                return Ok(text.join("\n\n"));
+                steering = steer();
+                if steering.is_empty() {
+                    return Ok(text.join("\n\n"));
+                }
             }
-            // Every call gets a result, even a refused or failed one, because
-            // the API rejects a conversation with an unanswered call.
+            // Every call gets a result, even a refused, failed, or skipped
+            // one, because the API rejects a conversation with an unanswered call.
             for (seq, call) in calls {
-                let output = self.call_tool(seq, &call, on_event, approve).await;
+                if steering.is_empty() {
+                    steering = steer();
+                }
+                let skip = !steering.is_empty();
+                let output = self.call_tool(seq, &call, skip, on_event, approve).await;
                 self.items.push(Item::ToolResult {
                     call_id: call.id,
                     output,
+                });
+            }
+            steering.extend(steer());
+            for text in steering {
+                self.items.push(Item::User { text: text.clone() });
+                on_event(Event::Steered {
+                    seq: self.items.len(),
+                    text,
                 });
             }
         }
@@ -109,6 +137,7 @@ impl Agent {
         &self,
         seq: usize,
         call: &ToolCall,
+        skip: bool,
         on_event: &mut dyn FnMut(Event),
         approve: &mut impl AsyncFnMut(Approval) -> bool,
     ) -> String {
@@ -134,6 +163,7 @@ impl Agent {
                 format!("Error: the arguments are not valid JSON: {e}"),
                 true,
             ),
+            _ if skip => (SKIPPED.to_string(), true),
             (Some(tool), Ok(args)) => {
                 let approved = !tool.needs_approval()
                     || approve(Approval {

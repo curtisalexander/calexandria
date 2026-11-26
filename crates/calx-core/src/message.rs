@@ -67,7 +67,9 @@ pub enum Event {
         summary: String,
         exposure: Exposure,
     },
-    /// A tool finished, or was declined; `seq` is its call's, as in `ToolStarted`.
+    /// A message the user sent during the turn was added as item `seq`.
+    Steered { seq: usize, text: String },
+    /// A tool finished, or was declined or skipped; `seq` is its call's, as in `ToolStarted`.
     ToolFinished {
         seq: usize,
         name: String,

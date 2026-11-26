@@ -2,15 +2,17 @@
 //! terminal, over SSH, and in scrollback. The left margin numbers each item
 //! (`§16`) and the right margin notes how long a tool took.
 
-use std::cell::RefCell;
-use std::collections::HashSet;
-use std::io::{BufRead, Write};
+use std::cell::{Cell, RefCell};
+use std::collections::{HashSet, VecDeque};
+use std::io::{BufRead, IsTerminal, Write};
 
 use anyhow::Result;
-use calx_core::agent::{Agent, Approval, DECLINED};
+use calx_core::agent::{Agent, Approval, DECLINED, SKIPPED};
 use calx_core::message::Event;
 
-use crate::status::{self, Tally};
+use tokio::sync::{Notify, mpsc};
+
+use crate::status::{self, Busy, Tally};
 
 const DIM: &str = "\x1b[2m";
 const BOLD: &str = "\x1b[1m";
@@ -38,6 +40,18 @@ pub struct Marginalia {
     /// Tools the user answered "always" for, this session.
     pub always: HashSet<String>,
     pub tally: Tally,
+    /// What a line typed while a turn runs does.
+    busy: Busy,
+    /// Lines from stdin, read on a thread that starts when first needed, so
+    /// the panel view gets the terminal to itself when calx starts in it.
+    lines: Option<mpsc::UnboundedReceiver<String>>,
+    /// Lines read but not used yet: approval answers and, from a pipe, prompts.
+    typed: VecDeque<String>,
+    /// Prompts to send next, before reading more.
+    queued: VecDeque<String>,
+    /// Whether stdin is a terminal. Piped input is read strictly in order,
+    /// as answers and prompts, never as steering.
+    interactive: bool,
 }
 
 /// Where the output cursor is, so the next piece starts in the right place.
@@ -58,6 +72,26 @@ enum Line {
 }
 
 impl Marginalia {
+    pub fn new(yes: bool, tally: Tally, busy: Busy) -> Self {
+        Self {
+            yes,
+            always: HashSet::new(),
+            tally,
+            busy,
+            lines: None,
+            typed: VecDeque::new(),
+            queued: VecDeque::new(),
+            interactive: std::io::stdin().is_terminal(),
+        }
+    }
+
+    async fn next_line(&mut self) -> Option<String> {
+        if let Some(line) = self.typed.pop_front() {
+            return Some(line);
+        }
+        self.lines.get_or_insert_with(spawn_reader).recv().await
+    }
+
     /// Reads prompts and runs them until the user quits.
     pub async fn converse(
         &mut self,
@@ -65,15 +99,25 @@ impl Marginalia {
         save: &dyn Fn(&Agent, usize),
     ) -> Result<Exit> {
         println!(
-            "{DIM}calx · {} · session {} · /panels for panels · /exit to quit{RESET}",
+            "{DIM}calx · {} · session {} · type while it works to {} · /panels for panels · /exit to quit{RESET}",
             agent.model,
-            &agent.session_id[..8]
+            &agent.session_id[..8],
+            self.busy.name()
         );
         loop {
             print!("\n{DIM}§{:<4}{RESET}{BOLD}>{RESET} ", agent.items.len() + 1);
-            std::io::stdout().flush()?;
-            let Some(line) = read_line() else {
-                return Ok(Exit::Quit);
+            let line = match self.queued.pop_front() {
+                Some(line) => {
+                    println!("{line}  {DIM}(sent while busy){RESET}");
+                    line
+                }
+                None => {
+                    std::io::stdout().flush()?;
+                    let Some(line) = self.next_line().await else {
+                        return Ok(Exit::Quit);
+                    };
+                    line
+                }
             };
             match line.trim() {
                 "" => continue,
@@ -82,7 +126,9 @@ impl Marginalia {
                 prompt => {
                     let before = agent.items.len();
                     match self.turn(agent, prompt).await {
-                        Ok(()) => save(agent, before),
+                        Ok(true) => save(agent, before),
+                        // Stopped: drop it, as for a failure.
+                        Ok(false) => agent.items.truncate(before),
                         Err(e) => {
                             // Drop the failed turn so the next one starts from a valid conversation.
                             agent.items.truncate(before);
@@ -95,12 +141,22 @@ impl Marginalia {
     }
 
     /// Runs one prompt, printing the reply and tool activity as it happens.
-    pub async fn turn(&mut self, agent: &mut Agent, prompt: &str) -> Result<()> {
+    /// Returns false when the user stopped it; the caller then drops its items.
+    ///
+    /// A line typed meanwhile answers a pending approval, or else does what
+    /// `busy` says: steer, queue, or stop. `/steer`, `/queue`, and `/stop`
+    /// before the text choose for one line.
+    pub async fn turn(&mut self, agent: &mut Agent, prompt: &str) -> Result<bool> {
         self.tally.start_turn();
         let width = terminal_width();
         let line = RefCell::new(Line::Fresh);
         let tally = RefCell::new(std::mem::take(&mut self.tally));
         let (yes, always) = (self.yes, RefCell::new(std::mem::take(&mut self.always)));
+        let typed = RefCell::new(std::mem::take(&mut self.typed));
+        let steering = RefCell::new(Vec::<String>::new());
+        // Whether an approval waits for a line, and whether stdin has ended.
+        let (asking, ended) = (Cell::new(false), Cell::new(false));
+        let arrived = Notify::new();
 
         // Output errors are ignored throughout: a closed pipe (`calx ... | head`)
         // must not panic before the caller saves the turn.
@@ -154,6 +210,8 @@ impl Marginalia {
                     *line = Line::Fresh;
                     if output == DECLINED {
                         let _ = writeln!(out, "{BODY}{DIM}declined{RESET}");
+                    } else if output == SKIPPED {
+                        let _ = writeln!(out, "{BODY}{DIM}skipped, you sent a message{RESET}");
                     } else {
                         let color = if is_error { RED } else { DIM };
                         let lines: Vec<&str> = output.lines().collect();
@@ -173,6 +231,11 @@ impl Marginalia {
                                 writeln!(out, "{BODY}{DIM}… {} more lines{RESET}", lines.len() - 4);
                         }
                     }
+                }
+                Event::Steered { seq, text } => {
+                    end_line(&mut out, &mut line);
+                    let text = one_line(&text, width.saturating_sub(MARGIN + 5));
+                    let _ = writeln!(out, "\n{DIM}§{seq:<4}{RESET}{BOLD}you{RESET} {text}");
                 }
                 Event::RequestStarted { .. } | Event::RequestFinished { .. } => {}
             }
@@ -210,7 +273,17 @@ impl Marginalia {
                      {BOLD}a{RESET} always this session  {BOLD}?{RESET} why  "
                 );
                 let _ = out.flush();
-                let answer = read_line().unwrap_or_default();
+                asking.set(true);
+                let answer = loop {
+                    if let Some(text) = typed.borrow_mut().pop_front() {
+                        break text;
+                    }
+                    if ended.get() {
+                        break String::new();
+                    }
+                    arrived.notified().await;
+                };
+                asking.set(false);
                 match answer.trim().to_lowercase().as_str() {
                     "y" | "yes" => return true,
                     "a" | "always" => {
@@ -223,18 +296,98 @@ impl Marginalia {
                             let _ = writeln!(out, "{BODY}{DIM}{text}{RESET}");
                         }
                     }
-                    _ => return false,
+                    "" | "n" | "no" => return false,
+                    // A message instead of an answer declines the call and steers.
+                    _ => {
+                        steering.borrow_mut().push(answer.trim().to_string());
+                        let _ = writeln!(
+                            out,
+                            "{BODY}{YELLOW}↳ declined; calx reads your message next{RESET}"
+                        );
+                        return false;
+                    }
                 }
             }
         };
-        let result = agent.run(prompt, &mut on_event, &mut approve).await;
+        let mut steer = || std::mem::take(&mut *steering.borrow_mut());
+        let (busy, interactive) = (self.busy, self.interactive);
+        let mut restart = None;
+        // None when the user stopped the turn.
+        let outcome = {
+            let run = agent.run(prompt, &mut on_event, &mut approve, &mut steer);
+            tokio::pin!(run);
+            let rx = self.lines.get_or_insert_with(spawn_reader);
+            loop {
+                tokio::select! {
+                    result = &mut run => break Some(result),
+                    got = rx.recv(), if !ended.get() => {
+                        let Some(text) = got else {
+                            ended.set(true);
+                            arrived.notify_one();
+                            continue;
+                        };
+                        if !interactive || (asking.get() && !is_handoff(&text)) {
+                            typed.borrow_mut().push_back(text);
+                            arrived.notify_one();
+                            continue;
+                        }
+                        if is_handoff(&text) {
+                            self.queued.push_back(text);
+                            continue;
+                        }
+                        let (mode, text) = classify(&text, busy);
+                        let text = text.to_string();
+                        if mode == Busy::Stop {
+                            restart = (!text.is_empty()).then_some(text);
+                            break None;
+                        }
+                        if text.is_empty() {
+                            continue;
+                        }
+                        // The Enter that sent it ended the line on screen.
+                        {
+                            let mut l = line.borrow_mut();
+                            *l = match *l {
+                                Line::Tool { .. } | Line::Asked => Line::Asked,
+                                _ => Line::Fresh,
+                            };
+                        }
+                        if mode == Busy::Steer {
+                            println!("{BODY}{YELLOW}↳ steer, at the next pause{RESET}");
+                            steering.borrow_mut().push(text);
+                        } else {
+                            println!("{BODY}{YELLOW}↳ queued, after this turn{RESET}");
+                            self.queued.push_back(text);
+                        }
+                    }
+                }
+            }
+        };
         self.tally = tally.into_inner();
         self.always = always.into_inner();
+        self.typed = typed.into_inner();
         let mut out = std::io::stdout();
         end_line(&mut out, &mut line.into_inner());
-        result?;
-        let _ = writeln!(out, "\n{}", self.status_line(width));
-        Ok(())
+        // Messages the turn never read become the next prompts.
+        let unread = steering.into_inner();
+        match outcome {
+            Some(result) => {
+                for text in unread.into_iter().rev() {
+                    self.queued.push_front(text);
+                }
+                result?;
+                let _ = writeln!(out, "\n{}", self.status_line(width));
+                Ok(true)
+            }
+            None => {
+                let next: Vec<String> = unread.into_iter().chain(restart).collect();
+                if !next.is_empty() {
+                    self.queued.push_front(next.join("\n\n"));
+                }
+                let _ = writeln!(out, "\n{DIM}Stopped. This turn was not saved.{RESET}");
+                Ok(false)
+            }
+        }
     }
 
     /// Context use, cache, time, and the trifecta, after each turn.
@@ -339,13 +492,42 @@ fn wrap(text: &str, max: usize) -> Vec<String> {
     lines
 }
 
-/// Reads a line from stdin; `None` at end of input.
-pub fn read_line() -> Option<String> {
-    let mut line = String::new();
-    match std::io::stdin().lock().read_line(&mut line) {
-        Ok(n) if n > 0 => Some(line),
-        _ => None,
+/// Reads stdin lines on a thread. It stops after a command that ends calx
+/// or hands the terminal to the panel view, so it does not take their keys.
+fn spawn_reader() -> mpsc::UnboundedReceiver<String> {
+    let (tx, rx) = mpsc::unbounded_channel();
+    std::thread::spawn(move || {
+        for line in std::io::stdin().lock().lines() {
+            let Ok(line) = line else { break };
+            let last = is_handoff(&line);
+            if tx.send(line).is_err() || last {
+                break;
+            }
+        }
+    });
+    rx
+}
+
+fn is_handoff(line: &str) -> bool {
+    matches!(line.trim(), "/exit" | "/quit" | "/panels")
+}
+
+/// What a line typed during a turn does, and its text.
+fn classify(line: &str, busy: Busy) -> (Busy, &str) {
+    let line = line.trim();
+    if line == "/stop" {
+        return (Busy::Stop, "");
     }
+    for (prefix, mode) in [
+        ("/steer ", Busy::Steer),
+        ("/queue ", Busy::Queue),
+        ("/stop ", Busy::Stop),
+    ] {
+        if let Some(rest) = line.strip_prefix(prefix) {
+            return (mode, rest.trim());
+        }
+    }
+    (busy, line)
 }
 
 /// Shortens text to one line of at most `max` characters for display.

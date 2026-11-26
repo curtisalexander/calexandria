@@ -4,11 +4,11 @@
 //! Reading room: the conversation and one side panel, switched with Tab.
 
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use calx_core::agent::{Agent, Approval, DECLINED, MAX_STEPS};
+use calx_core::agent::{Agent, Approval, DECLINED, MAX_STEPS, SKIPPED};
 use calx_core::message::{Event, Exposure, Item};
 use crossterm::event::{
     DisableBracketedPaste, EnableBracketedPaste, Event as Input, EventStream, KeyCode, KeyEvent,
@@ -24,7 +24,7 @@ use tokio::sync::oneshot;
 
 use crate::marginalia::one_line;
 use crate::notes::Notes;
-use crate::status::{self, Tally};
+use crate::status::{self, Busy, Tally};
 
 /// The narrowest terminal that shows the tiles; narrower ones get the Reading room.
 pub const WIDE: u16 = 140;
@@ -137,6 +137,7 @@ enum State {
     Ok,
     Failed,
     Declined,
+    Skipped,
 }
 
 struct ToolRow {
@@ -189,6 +190,14 @@ pub struct App {
     side: Panel,
     pending: Option<(Approval, oneshot::Sender<bool>)>,
     show_why: bool,
+    /// What Enter does while a turn runs; Alt-Enter does [`alternative`].
+    pub busy: Busy,
+    /// Messages for the running turn, read at its next pause.
+    steering: Vec<String>,
+    /// Prompts to send, in order, once the turn ends.
+    queued: VecDeque<String>,
+    /// A prompt to send after the turn the user stopped for it.
+    restart: Option<String>,
     notes: Notes,
     notes_open: bool,
     /// Keys go to the notes instead of the prompt.
@@ -222,6 +231,10 @@ impl App {
             side: Panel::Diff,
             pending: None,
             show_why: false,
+            busy: Busy::default(),
+            steering: Vec::new(),
+            queued: VecDeque::new(),
+            restart: None,
             notes: Notes::load(),
             notes_open: false,
             notes_focus: false,
@@ -280,6 +293,8 @@ impl App {
                     if let Some(row) = call_seq.and_then(|at| self.row(at + 1)) {
                         row.state = if output == DECLINED {
                             State::Declined
+                        } else if output == SKIPPED {
+                            State::Skipped
                         } else if output.starts_with("Error:") {
                             State::Failed
                         } else {
@@ -331,6 +346,11 @@ impl App {
                 }
             }
             Event::RequestFinished { .. } => {}
+            Event::Steered { seq, text } => {
+                self.mix.messages += status::estimate(&text);
+                self.items = seq;
+                self.entries.push(Entry::User { seq, text });
+            }
             Event::ToolStarted {
                 seq, name, summary, ..
             } => {
@@ -355,8 +375,9 @@ impl App {
             } => {
                 self.mix.tool_output += status::estimate(&output);
                 if let Some(row) = self.row(seq) {
-                    row.state = match (output == DECLINED, is_error) {
-                        (true, _) => State::Declined,
+                    row.state = match (output.as_str(), is_error) {
+                        (DECLINED, _) => State::Declined,
+                        (SKIPPED, _) => State::Skipped,
                         (_, true) => State::Failed,
                         _ => State::Ok,
                     };
@@ -464,7 +485,7 @@ impl App {
         }
     }
 
-    /// Handles a key during a turn. Returns true to cancel the turn.
+    /// Handles a key during a turn. Returns true to stop the turn.
     fn running_key(&mut self, key: KeyEvent) -> bool {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         if ctrl && key.code == KeyCode::Char('c') {
@@ -474,18 +495,58 @@ impl App {
         if self.common_key(&key) || self.notes_key(&key) {
             return false;
         }
-        if key.code == KeyCode::Esc {
-            return true;
-        }
-        if self.pending.is_none() {
+        if self.pending.is_some() {
+            match key.code {
+                KeyCode::Esc => return true,
+                KeyCode::Char('y') => self.answer(true, false),
+                KeyCode::Char('a') => self.answer(true, true),
+                KeyCode::Char('n') => self.answer(false, false),
+                KeyCode::Char('?') => self.show_why = !self.show_why,
+                _ => {}
+            }
             return false;
         }
         match key.code {
-            KeyCode::Char('y') => self.answer(true, false),
-            KeyCode::Char('a') => self.answer(true, true),
-            KeyCode::Char('n') => self.answer(false, false),
-            KeyCode::Char('?') => self.show_why = !self.show_why,
+            // Esc clears what you are typing first, then stops the turn.
+            KeyCode::Esc if self.input.is_empty() => return true,
+            KeyCode::Esc => self.input.clear(),
+            KeyCode::Enter => {
+                let mode = if key.modifiers.contains(KeyModifiers::ALT) {
+                    alternative(self.busy)
+                } else {
+                    self.busy
+                };
+                return self.send_while_busy(mode);
+            }
+            // Takes back the last message not yet delivered.
+            KeyCode::Char('u') if ctrl && self.input.is_empty() => {
+                if let Some(text) = self.steering.pop().or_else(|| self.queued.pop_back()) {
+                    self.input = text;
+                }
+            }
+            KeyCode::Char('u') if ctrl => self.input.clear(),
+            KeyCode::Char(c) if !ctrl => self.input.push(c),
+            KeyCode::Backspace => {
+                self.input.pop();
+            }
             _ => {}
+        }
+        false
+    }
+
+    /// Sends what was typed during a turn. Returns true to stop the turn.
+    fn send_while_busy(&mut self, mode: Busy) -> bool {
+        let text = std::mem::take(&mut self.input).trim().to_string();
+        if text.is_empty() {
+            return false;
+        }
+        match mode {
+            Busy::Steer => self.steering.push(text),
+            Busy::Queue => self.queued.push_back(text),
+            Busy::Stop => {
+                self.restart = Some(text);
+                return true;
+            }
         }
         false
     }
@@ -657,11 +718,13 @@ impl App {
                 Span::raw(" why  "),
                 dim("· Esc stops the turn"),
             ]),
-            (None, Some((started, step))) => Line::from(dim(format!(
-                "working · request {step} · {} · Esc stops · PgUp scrolls",
-                status::duration(started.elapsed().as_millis() as u64)
+            (None, Some((started, step))) if self.input.is_empty() => Line::from(dim(format!(
+                "working · request {step} · {} · type and Enter to {}, Alt-Enter to {} · Esc stops",
+                status::duration(started.elapsed().as_millis() as u64),
+                self.busy.name(),
+                alternative(self.busy).name(),
             ))),
-            (None, None) => {
+            (None, _) => {
                 let room = area.width.saturating_sub(3) as usize;
                 let chars: Vec<char> = self.input.chars().collect();
                 let shown: String = chars[chars.len().saturating_sub(room)..]
@@ -752,7 +815,7 @@ impl App {
                             ))));
                         }
                     } else if let Some(first) = row.output.lines().next()
-                        && row.state != State::Declined
+                        && !matches!(row.state, State::Declined | State::Skipped)
                     {
                         let style = if row.state == State::Failed {
                             Style::new().fg(Color::Red)
@@ -774,6 +837,17 @@ impl App {
                     lines.push(Line::from(Span::styled(format!("     {text}"), style)));
                 }
             }
+        }
+        let waiting = self
+            .steering
+            .iter()
+            .map(|t| ("steer, at the next pause", t))
+            .chain(self.queued.iter().map(|t| ("queued, after this turn", t)));
+        for (label, text) in waiting {
+            lines.push(Line::from(vec![
+                Span::styled(format!("     ↳ {label}: "), Style::new().fg(Color::Yellow)),
+                Span::raw(one_line(text, 200)),
+            ]));
         }
         lines
     }
@@ -880,6 +954,7 @@ impl App {
                 State::Ok => ("ok", Color::Green),
                 State::Failed => ("failed", Color::Red),
                 State::Declined => ("declined", Color::DarkGray),
+                State::Skipped => ("skipped", Color::DarkGray),
             };
             lines.push(Line::from(vec![
                 Span::raw(format!(
@@ -1047,11 +1122,15 @@ impl App {
             row("effort", i.effort.clone().unwrap_or("none".into())),
             row("approvals", if self.yes { "none (-y)".into() } else { "ask".into() }),
             row("always this session", if always.is_empty() { "–".into() } else { always.join(", ") }),
+            row(
+                "while busy, Enter / Alt-Enter",
+                format!("{} / {}", self.busy.name(), alternative(self.busy).name()),
+            ),
             row("shell", i.shell.clone()),
             row("layout", LAYOUTS[self.layout].0.to_string()),
             row("context window", format!("{} (assumed)", status::tokens(status::CONTEXT_WINDOW))),
             Line::default(),
-            dim("Read-only for now. Set them with --model or CALX_MODEL, --effort or CALX_EFFORT, -y, and CALX_SHELL.").into(),
+            dim("Read-only for now. Set them with --model or CALX_MODEL, --effort or CALX_EFFORT, --while-busy or CALX_WHILE_BUSY, -y, and CALX_SHELL.").into(),
         ]
     }
 }
@@ -1124,13 +1203,25 @@ async fn main_loop(
         match prompt.trim() {
             "" => {}
             "/exit" | "/quit" => return Ok(()),
-            prompt => turn(app, terminal, &mut keys, agent, prompt, save).await?,
+            prompt => {
+                // Then any prompts queued or sent with a stop during it.
+                let mut next = Some(prompt.to_string());
+                while let Some(prompt) = next {
+                    let done = turn(app, terminal, &mut keys, agent, &prompt, save).await?;
+                    let mut a = app.borrow_mut();
+                    next = a.restart.take();
+                    if next.is_none() && done {
+                        next = a.queued.pop_front();
+                    }
+                }
+            }
         }
     }
 }
 
-/// Runs one prompt while drawing and answering keys. Only terminal errors
-/// return `Err`; a failed turn is shown in the conversation.
+/// Runs one prompt while drawing and answering keys, and returns whether it
+/// finished. Only terminal errors return `Err`; a failed turn is shown in the
+/// conversation.
 async fn turn(
     app: &RefCell<App>,
     terminal: &mut DefaultTerminal,
@@ -1138,7 +1229,7 @@ async fn turn(
     agent: &mut Agent,
     prompt: &str,
     save: &dyn Fn(&Agent, usize),
-) -> Result<()> {
+) -> Result<bool> {
     let before = agent.items.len();
     {
         let mut a = app.borrow_mut();
@@ -1164,7 +1255,8 @@ async fn turn(
             app.borrow_mut().ask(ask, tx);
             rx.await.unwrap_or(false)
         };
-        let run = agent.run(prompt, &mut on_event, &mut approve);
+        let mut steer = || std::mem::take(&mut app.borrow_mut().steering);
+        let run = agent.run(prompt, &mut on_event, &mut approve, &mut steer);
         tokio::pin!(run);
         // Redraws streamed text and the clock between keys.
         let mut tick = tokio::time::interval(Duration::from_millis(80));
@@ -1181,7 +1273,7 @@ async fn turn(
                             break Outcome::Cancelled;
                         }
                     }
-                    Input::Paste(text) if app.borrow().notes_focus => app.borrow_mut().paste(&text),
+                    Input::Paste(text) => app.borrow_mut().paste(&text),
                     _ => {}
                 },
                 _ = tick.tick() => {}
@@ -1191,6 +1283,20 @@ async fn turn(
     let mut a = app.borrow_mut();
     a.running = None;
     a.pending = None;
+    let done = matches!(outcome, Outcome::Done);
+    if done {
+        // Steering that came after the turn's last pause goes next.
+        for text in std::mem::take(&mut a.steering).into_iter().rev() {
+            a.queued.push_front(text);
+        }
+    } else {
+        // Steering the turn never read goes back into the prompt, not lost.
+        let mut back = std::mem::take(&mut a.steering);
+        if !a.input.is_empty() {
+            back.push(std::mem::take(&mut a.input));
+        }
+        a.input = back.join(" ");
+    }
     match outcome {
         Outcome::Done => save(agent, before),
         Outcome::Failed(e) => {
@@ -1212,7 +1318,15 @@ async fn turn(
         }
     }
     a.items = agent.items.len();
-    Ok(())
+    Ok(done)
+}
+
+/// What Alt-Enter does while a turn runs: queue, or steer when Enter queues.
+fn alternative(busy: Busy) -> Busy {
+    match busy {
+        Busy::Queue => Busy::Steer,
+        Busy::Steer | Busy::Stop => Busy::Queue,
+    }
 }
 
 fn cycle(all: &[Panel], current: Panel, by: usize) -> Panel {
@@ -1244,6 +1358,7 @@ fn state_spans(row: &ToolRow) -> Vec<Span<'static>> {
             Color::Red,
         ),
         State::Declined => ("declined".to_string(), Color::DarkGray),
+        State::Skipped => ("skipped".to_string(), Color::DarkGray),
     };
     vec![Span::styled(text, Style::new().fg(color))]
 }

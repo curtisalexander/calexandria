@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 
-use calx_core::agent::{Agent, DECLINED};
+use calx_core::agent::{Agent, DECLINED, SKIPPED};
 use calx_core::message::{Event, Exposure, Item, Usage};
 
 /// The context window the views measure use against. Responses does not
@@ -32,7 +32,7 @@ impl Tally {
         let mut declined = std::collections::HashSet::new();
         for item in &agent.items {
             if let Item::ToolResult { call_id, output } = item
-                && output == DECLINED
+                && !ran(output)
             {
                 declined.insert(call_id.as_str());
             }
@@ -78,9 +78,9 @@ impl Tally {
                 ..
             } => {
                 self.turn_tool_ms += duration_ms;
-                // A declined call opened nothing.
+                // A declined or skipped call opened nothing.
                 if let Some(exposure) = self.started.remove(seq)
-                    && output != DECLINED
+                    && ran(output)
                 {
                     self.exposure |= exposure;
                 }
@@ -93,6 +93,33 @@ impl Tally {
     pub fn cache_percent(&self) -> Option<u64> {
         (self.last.input_tokens > 0)
             .then(|| self.last.cached_input_tokens * 100 / self.last.input_tokens)
+    }
+}
+
+/// Whether a tool call with this result ran, rather than being declined or skipped.
+pub fn ran(output: &str) -> bool {
+    output != DECLINED && output != SKIPPED
+}
+
+/// What a prompt sent while a turn runs does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+pub enum Busy {
+    /// Read by the model at the next pause in the turn.
+    #[default]
+    Steer,
+    /// Sent as a new prompt once the turn ends.
+    Queue,
+    /// Stops the turn and sends it as a new prompt.
+    Stop,
+}
+
+impl Busy {
+    pub fn name(self) -> &'static str {
+        match self {
+            Busy::Steer => "steer",
+            Busy::Queue => "queue",
+            Busy::Stop => "stop",
+        }
     }
 }
 
