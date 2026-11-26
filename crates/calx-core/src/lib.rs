@@ -33,7 +33,7 @@ pub fn new_id() -> String {
 /// Writes a file only the current user can read (on Unix; Windows profile
 /// directories are already private to the user). It writes a temporary file
 /// and renames it into place, so a crash never leaves a half-written file.
-pub(crate) fn write_private(path: &Path, contents: &str) -> Result<()> {
+pub fn write_private(path: &Path, contents: &str) -> Result<()> {
     use std::io::Write;
     if let Some(dir) = path.parent() {
         create_private_dir(dir)?;

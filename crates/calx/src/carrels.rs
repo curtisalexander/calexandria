@@ -23,6 +23,7 @@ use ratatui::{DefaultTerminal, Frame};
 use tokio::sync::oneshot;
 
 use crate::marginalia::one_line;
+use crate::notes::Notes;
 use crate::status::{self, Tally};
 
 /// The narrowest terminal that shows the tiles; narrower ones get the Reading room.
@@ -188,6 +189,10 @@ pub struct App {
     side: Panel,
     pending: Option<(Approval, oneshot::Sender<bool>)>,
     show_why: bool,
+    notes: Notes,
+    notes_open: bool,
+    /// Keys go to the notes instead of the prompt.
+    notes_focus: bool,
     /// Set while a turn runs: when it started and its current request.
     running: Option<(Instant, usize)>,
     /// Items sent with the latest request.
@@ -217,6 +222,9 @@ impl App {
             side: Panel::Diff,
             pending: None,
             show_why: false,
+            notes: Notes::load(),
+            notes_open: false,
+            notes_focus: false,
             running: None,
             sent_items: 0,
             items: agent.items.len(),
@@ -399,18 +407,77 @@ impl App {
             KeyCode::Tab => self.side = cycle(&Panel::ALL, self.side, 1),
             KeyCode::BackTab => self.side = cycle(&Panel::ALL, self.side, Panel::ALL.len() - 1),
             KeyCode::Char('l') if ctrl => self.layout = (self.layout + 1) % LAYOUTS.len(),
+            // Opens the notes, then closes them; from the prompt it moves into open notes.
+            KeyCode::Char('n') if ctrl => {
+                if self.notes_open && self.notes_focus {
+                    self.notes_open = false;
+                    self.leave_notes();
+                } else {
+                    self.notes_open = true;
+                    self.notes_focus = true;
+                }
+            }
             _ => return false,
         }
         true
     }
 
+    fn leave_notes(&mut self) {
+        self.notes_focus = false;
+        if let Err(e) = self.notes.save() {
+            self.note(format!("could not save notes: {e:#}"), true);
+        }
+    }
+
+    /// Edits the notes while they have focus. Returns whether it used the key.
+    fn notes_key(&mut self, key: &KeyEvent) -> bool {
+        if !self.notes_focus {
+            return false;
+        }
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        match key.code {
+            KeyCode::Esc => self.leave_notes(),
+            // Moves the last paragraph into the prompt, where Enter sends it.
+            KeyCode::Char('s') if ctrl => {
+                if let Some(draft) = self.notes.take_draft() {
+                    if !self.input.is_empty() {
+                        self.input.push(' ');
+                    }
+                    self.input.push_str(&draft);
+                }
+                self.leave_notes();
+            }
+            KeyCode::Char(c) if !ctrl => self.notes.push_str(c.encode_utf8(&mut [0; 4])),
+            KeyCode::Enter => self.notes.push_str("\n"),
+            KeyCode::Backspace => self.notes.pop(),
+            _ => return false,
+        }
+        true
+    }
+
+    /// Pasted text goes to whichever of the notes and the prompt has focus.
+    fn paste(&mut self, text: &str) {
+        if self.notes_focus {
+            self.notes.push_str(text);
+        } else {
+            self.input.push_str(&text.replace("\r\n", "\n"));
+        }
+    }
+
     /// Handles a key during a turn. Returns true to cancel the turn.
     fn running_key(&mut self, key: KeyEvent) -> bool {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        if key.code == KeyCode::Esc || (ctrl && key.code == KeyCode::Char('c')) {
+        if ctrl && key.code == KeyCode::Char('c') {
             return true;
         }
-        if self.common_key(&key) || self.pending.is_none() {
+        // In the notes, Esc only leaves them, and y or n is just text.
+        if self.common_key(&key) || self.notes_key(&key) {
+            return false;
+        }
+        if key.code == KeyCode::Esc {
+            return true;
+        }
+        if self.pending.is_none() {
             return false;
         }
         match key.code {
@@ -437,8 +504,15 @@ impl App {
 
         let arrangement = arrange(area.width, self.layout, self.side);
         let where_ = match &arrangement {
-            Arrangement::Tiles(_) => format!("layout: {} · Ctrl-L next", LAYOUTS[self.layout].0),
-            Arrangement::ReadingRoom(_) => "reading room · Tab next panel".to_string(),
+            Arrangement::Tiles(_) => {
+                format!(
+                    "layout: {} · Ctrl-L next · Ctrl-N notes",
+                    LAYOUTS[self.layout].0
+                )
+            }
+            Arrangement::ReadingRoom(_) => {
+                "reading room · Tab next panel · Ctrl-N notes".to_string()
+            }
         };
         let effort = self.info.effort.as_deref().unwrap_or("no reasoning");
         self.split_line(
@@ -466,14 +540,22 @@ impl App {
                 self.conversation(f, conv);
                 self.panel(f, low, under, false);
                 self.panel(f, up, top, false);
-                self.panel(f, down, bottom, false);
+                if self.notes_open {
+                    self.notes_aside(f, down);
+                } else {
+                    self.panel(f, down, bottom, false);
+                }
             }
             Arrangement::ReadingRoom(side) => {
                 let [conv, panel] =
                     Layout::horizontal([Constraint::Percentage(62), Constraint::Fill(1)])
                         .areas(body);
                 self.conversation(f, conv);
-                self.panel(f, panel, side, true);
+                if self.notes_open {
+                    self.notes_aside(f, panel);
+                } else {
+                    self.panel(f, panel, side, true);
+                }
             }
         }
 
@@ -519,6 +601,47 @@ impl App {
         self.split_line(f, area, left, right);
     }
 
+    /// The notes, in place of the side panel or the lower right tile.
+    fn notes_aside(&self, f: &mut Frame, area: Rect) {
+        let (border, hint) = if self.notes_focus {
+            (
+                Color::Cyan,
+                " Esc leaves · Ctrl-S last paragraph to prompt · Ctrl-N closes ",
+            )
+        } else {
+            (Color::DarkGray, " Ctrl-N to edit ")
+        };
+        let block = Block::bordered()
+            .border_style(Style::new().fg(border))
+            .title(Span::styled(" Notes ", Style::new().fg(Color::Yellow)))
+            .title_bottom(dim(hint));
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+        let mut lines: Vec<Line> = if self.notes.text.is_empty() && !self.notes_focus {
+            vec![
+                dim(
+                    "Notes for you, never sent to the model. Draft a prompt in the last paragraph.",
+                )
+                .into(),
+            ]
+        } else {
+            self.notes
+                .text
+                .split('\n')
+                .map(|l| Line::from(Span::raw(l)))
+                .collect()
+        };
+        if self.notes_focus
+            && let Some(last) = lines.last_mut()
+        {
+            last.spans
+                .push(Span::styled("▏", Style::new().fg(Color::Cyan)));
+        }
+        let paragraph = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });
+        let top = (paragraph.line_count(inner.width) as u16).saturating_sub(inner.height);
+        f.render_widget(paragraph.scroll((top, 0)), inner);
+    }
+
     fn input_line(&self, f: &mut Frame, area: Rect) {
         let line = match (&self.pending, self.running) {
             (Some((ask, _)), _) => Line::from(vec![
@@ -541,9 +664,14 @@ impl App {
             (None, None) => {
                 let room = area.width.saturating_sub(3) as usize;
                 let chars: Vec<char> = self.input.chars().collect();
-                let shown: String = chars[chars.len().saturating_sub(room)..].iter().collect();
-                let x = area.x + 2 + shown.chars().count() as u16;
-                f.set_cursor_position((x, area.y));
+                let shown: String = chars[chars.len().saturating_sub(room)..]
+                    .iter()
+                    .map(|&c| if c == '\n' { '↵' } else { c })
+                    .collect();
+                if !self.notes_focus {
+                    let x = area.x + 2 + shown.chars().count() as u16;
+                    f.set_cursor_position((x, area.y));
+                }
                 Line::from(vec![
                     Span::styled("> ", Style::new().fg(Color::Cyan)),
                     Span::raw(shown),
@@ -875,6 +1003,7 @@ impl App {
             row("last request sent", format!("§1–§{}", self.sent_items)),
             row("step limit per prompt", MAX_STEPS.to_string()),
             row("home", i.home.clone()),
+            row("notes", self.notes.path()),
             Line::default(),
             dim("tools (P private · U untrusted · E egress)").into(),
         ];
@@ -931,10 +1060,13 @@ impl App {
 pub async fn run(app: App, agent: &mut Agent, save: &dyn Fn(&Agent, usize)) -> Result<()> {
     let mut terminal = ratatui::init();
     let _ = crossterm::execute!(std::io::stdout(), EnableBracketedPaste);
-    let result = main_loop(&RefCell::new(app), &mut terminal, agent, save).await;
+    let app = RefCell::new(app);
+    let result = main_loop(&app, &mut terminal, agent, save).await;
+    let saved = app.borrow_mut().notes.save();
     let _ = crossterm::execute!(std::io::stdout(), DisableBracketedPaste);
     ratatui::restore();
-    result
+    result?;
+    saved
 }
 
 async fn main_loop(
@@ -953,11 +1085,11 @@ async fn main_loop(
             let mut a = app.borrow_mut();
             match input? {
                 Input::Paste(text) => {
-                    a.input.push_str(&text.replace("\r\n", "\n"));
+                    a.paste(&text);
                     continue;
                 }
                 Input::Key(key) if key.kind == KeyEventKind::Press => {
-                    if a.common_key(&key) {
+                    if a.common_key(&key) || a.notes_key(&key) {
                         continue;
                     }
                     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
@@ -1043,14 +1175,15 @@ async fn turn(
                     Ok(_) => Outcome::Done,
                     Err(e) => Outcome::Failed(e),
                 },
-                Some(input) = keys.next() => {
-                    if let Input::Key(key) = input?
-                        && key.kind == KeyEventKind::Press
-                        && app.borrow_mut().running_key(key)
-                    {
-                        break Outcome::Cancelled;
+                Some(input) = keys.next() => match input? {
+                    Input::Key(key) if key.kind == KeyEventKind::Press => {
+                        if app.borrow_mut().running_key(key) {
+                            break Outcome::Cancelled;
+                        }
                     }
-                }
+                    Input::Paste(text) if app.borrow().notes_focus => app.borrow_mut().paste(&text),
+                    _ => {}
+                },
                 _ = tick.tick() => {}
             }
         }

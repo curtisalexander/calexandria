@@ -53,7 +53,10 @@ calx logout
 
 In the panel view, Tab switches the side panel, Ctrl-L switches layouts
 (coding, research, inspect), PgUp and PgDn scroll, Esc stops a running turn,
-and Ctrl-D quits. When calx asks to run a tool, answer `y` yes, `n` no, `a`
+and Ctrl-D quits. Ctrl-N opens a Notes aside, a scratchpad saved to
+`~/.calx/notes.md` and never sent to the model: jot things down while calx
+works, or draft your next prompt as the last paragraph and press Ctrl-S to
+move it into the prompt. Esc leaves the notes without stopping the turn. When calx asks to run a tool, answer `y` yes, `n` no, `a`
 always for that tool this session, or `?` for why it asks.
 
 Every conversation is saved to `~/.calx/sessions.db` (SQLite) after each turn,

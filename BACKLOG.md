@@ -68,3 +68,10 @@ everything here, or in this order; the README roadmap is the near-term plan.
   cap concurrent tool calls (Pi uses four), memory, and run time.
 - **Parallel tool calls.** The model can already request several at once; calx
   runs them one after another.
+
+## Input
+
+- **Voice prompts.** Speak a prompt, or dictate into the Notes aside. Transcribe
+  locally where possible (for example Whisper through MLX on macOS) so audio
+  never leaves the machine, with a hosted transcription API as the fallback.
+  Show the transcript for editing before it is sent.

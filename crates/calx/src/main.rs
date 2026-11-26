@@ -1,5 +1,6 @@
 mod carrels;
 mod marginalia;
+mod notes;
 mod status;
 
 use std::io::BufRead;
