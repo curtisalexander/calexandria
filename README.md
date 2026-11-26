@@ -63,10 +63,16 @@ queue, and Ctrl-U with an empty prompt takes back the last message not yet read.
 
 In the panel view, Tab switches the side panel, Ctrl-L switches layouts
 (coding, research, inspect), PgUp and PgDn scroll, Esc stops a running turn,
-and Ctrl-D quits. Ctrl-N opens a Notes aside, a scratchpad saved to
-`~/.calx/notes.md` and never sent to the model: jot things down while calx
-works, or draft your next prompt as the last paragraph and press Ctrl-S to
-move it into the prompt. Esc leaves the notes without stopping the turn. When calx asks to run a tool, answer `y` yes, `n` no, `a`
+and Ctrl-D quits. The prompt grows as you type: Ctrl-J starts a new
+line, and pasted text keeps its lines. Ctrl-N opens a Notes aside, a scratchpad
+saved to `~/.calx/notes.md` and never sent to the model: jot things down while
+calx works, or draft your next prompt as the last paragraph and press Ctrl-S to
+move it into the prompt. The notes edit with vim keys (motions, `dd`, `o`, `u`,
+visual mode, `/` search); they open in insert mode, and Esc in normal mode
+leaves them without stopping the turn.
+
+In the plain view, a paste of several lines is one prompt, and a line that ends
+with `\` continues on the next, as in a shell. When calx asks to run a tool, answer `y` yes, `n` no, `a`
 always for that tool this session, or `?` for why it asks.
 
 Every conversation is saved to `~/.calx/sessions.db` (SQLite) after each turn,
@@ -105,8 +111,8 @@ the Keychain to ask once after each update whether calx may use its key.
 1. More tools (search, find files) and saved approval rules.
 2. More model backends: Chat Completions (local MLX, Ollama, work gateways),
    API keys, and a configurable OAuth flow for work.
-3. Terminal UI next steps: a Trace view of every request in a turn, editable
-   Prefs, and multi-line input.
+3. Terminal UI next steps: a Trace view of every request in a turn, and
+   editable Prefs.
 4. Memory, and extensions written in Python.
 
 Longer-term ideas, such as compaction and where tools run, are in

@@ -22,6 +22,7 @@ use ratatui::widgets::{Block, Paragraph, Wrap};
 use ratatui::{DefaultTerminal, Frame};
 use tokio::sync::oneshot;
 
+use crate::editor::Editor;
 use crate::marginalia::one_line;
 use crate::notes::Notes;
 use crate::status::{self, Busy, Tally};
@@ -183,7 +184,7 @@ pub struct App {
     entries: Vec<Entry>,
     tools: Vec<ToolRow>,
     mix: Mix,
-    input: String,
+    input: Editor,
     /// Conversation lines scrolled up from the bottom.
     scroll: u16,
     layout: usize,
@@ -225,7 +226,7 @@ impl App {
             entries: Vec::new(),
             tools: Vec::new(),
             mix: Mix::default(),
-            input: String::new(),
+            input: Editor::plain(),
             scroll: 0,
             layout: 0,
             side: Panel::Diff,
@@ -457,21 +458,19 @@ impl App {
         }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
-            KeyCode::Esc => self.leave_notes(),
+            // Esc leaves insert mode first, as in vim, then the notes.
+            KeyCode::Esc if self.notes.editor.is_normal_mode() => self.leave_notes(),
             // Moves the last paragraph into the prompt, where Enter sends it.
             KeyCode::Char('s') if ctrl => {
                 if let Some(draft) = self.notes.take_draft() {
                     if !self.input.is_empty() {
-                        self.input.push(' ');
+                        self.input.paste("\n");
                     }
-                    self.input.push_str(&draft);
+                    self.input.paste(&draft);
                 }
                 self.leave_notes();
             }
-            KeyCode::Char(c) if !ctrl => self.notes.push_str(c.encode_utf8(&mut [0; 4])),
-            KeyCode::Enter => self.notes.push_str("\n"),
-            KeyCode::Backspace => self.notes.pop(),
-            _ => return false,
+            _ => self.notes.editor.key(*key),
         }
         true
     }
@@ -479,10 +478,25 @@ impl App {
     /// Pasted text goes to whichever of the notes and the prompt has focus.
     fn paste(&mut self, text: &str) {
         if self.notes_focus {
-            self.notes.push_str(text);
+            self.notes.editor.paste(text);
         } else {
-            self.input.push_str(&text.replace("\r\n", "\n"));
+            self.input.paste(text);
         }
+    }
+
+    /// Prompt keys that work idle and during a turn. Returns whether it used the key.
+    fn prompt_key(&mut self, key: KeyEvent) -> bool {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        match key.code {
+            KeyCode::Enter if key.modifiers.is_empty() => return false,
+            KeyCode::Enter if key.modifiers.contains(KeyModifiers::ALT) => return false,
+            KeyCode::Char('u') if ctrl => {
+                self.input.set("");
+            }
+            KeyCode::Char('c' | 'd') if ctrl => return false,
+            _ => self.input.key(key),
+        }
+        true
     }
 
     /// Handles a key during a turn. Returns true to stop the turn.
@@ -506,10 +520,13 @@ impl App {
             }
             return false;
         }
+        let empty = self.input.is_empty();
         match key.code {
             // Esc clears what you are typing first, then stops the turn.
-            KeyCode::Esc if self.input.is_empty() => return true,
-            KeyCode::Esc => self.input.clear(),
+            KeyCode::Esc if empty => return true,
+            KeyCode::Esc => {
+                self.input.set("");
+            }
             KeyCode::Enter => {
                 let mode = if key.modifiers.contains(KeyModifiers::ALT) {
                     alternative(self.busy)
@@ -519,24 +536,21 @@ impl App {
                 return self.send_while_busy(mode);
             }
             // Takes back the last message not yet delivered.
-            KeyCode::Char('u') if ctrl && self.input.is_empty() => {
+            KeyCode::Char('u') if ctrl && empty => {
                 if let Some(text) = self.steering.pop().or_else(|| self.queued.pop_back()) {
-                    self.input = text;
+                    self.input.set(&text);
                 }
             }
-            KeyCode::Char('u') if ctrl => self.input.clear(),
-            KeyCode::Char(c) if !ctrl => self.input.push(c),
-            KeyCode::Backspace => {
-                self.input.pop();
+            _ => {
+                self.prompt_key(key);
             }
-            _ => {}
         }
         false
     }
 
     /// Sends what was typed during a turn. Returns true to stop the turn.
     fn send_while_busy(&mut self, mode: Busy) -> bool {
-        let text = std::mem::take(&mut self.input).trim().to_string();
+        let text = self.input.take().trim().to_string();
         if text.is_empty() {
             return false;
         }
@@ -553,13 +567,18 @@ impl App {
 
     // Drawing.
 
-    fn draw(&self, f: &mut Frame) {
+    fn draw(&mut self, f: &mut Frame) {
         let area = f.area();
+        // The prompt grows with its text, up to a third of the screen.
+        let rows = self
+            .input
+            .rows(area.width.saturating_sub(2))
+            .clamp(1, (area.height / 3).max(1));
         let [header, body, footer, input] = Layout::vertical([
             Constraint::Length(1),
             Constraint::Fill(1),
             Constraint::Length(1),
-            Constraint::Length(1),
+            Constraint::Length(rows),
         ])
         .areas(area);
 
@@ -663,12 +682,9 @@ impl App {
     }
 
     /// The notes, in place of the side panel or the lower right tile.
-    fn notes_aside(&self, f: &mut Frame, area: Rect) {
+    fn notes_aside(&mut self, f: &mut Frame, area: Rect) {
         let (border, hint) = if self.notes_focus {
-            (
-                Color::Cyan,
-                " Esc leaves · Ctrl-S last paragraph to prompt · Ctrl-N closes ",
-            )
+            (Color::Cyan, " Esc Esc leaves · Ctrl-S to prompt ")
         } else {
             (Color::DarkGray, " Ctrl-N to edit ")
         };
@@ -678,32 +694,17 @@ impl App {
             .title_bottom(dim(hint));
         let inner = block.inner(area);
         f.render_widget(block, area);
-        let mut lines: Vec<Line> = if self.notes.text.is_empty() && !self.notes_focus {
-            vec![
-                dim(
-                    "Notes for you, never sent to the model. Draft a prompt in the last paragraph.",
-                )
-                .into(),
-            ]
+        if self.notes.editor.is_empty() && !self.notes_focus {
+            let hint =
+                "Notes for you, never sent to the model. Draft a prompt in the last paragraph.";
+            f.render_widget(Paragraph::new(dim(hint)).wrap(Wrap { trim: false }), inner);
         } else {
-            self.notes
-                .text
-                .split('\n')
-                .map(|l| Line::from(Span::raw(l)))
-                .collect()
-        };
-        if self.notes_focus
-            && let Some(last) = lines.last_mut()
-        {
-            last.spans
-                .push(Span::styled("▏", Style::new().fg(Color::Cyan)));
+            let focused = self.notes_focus;
+            self.notes.editor.render(f, inner, focused);
         }
-        let paragraph = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });
-        let top = (paragraph.line_count(inner.width) as u16).saturating_sub(inner.height);
-        f.render_widget(paragraph.scroll((top, 0)), inner);
     }
 
-    fn input_line(&self, f: &mut Frame, area: Rect) {
+    fn input_line(&mut self, f: &mut Frame, area: Rect) {
         let line = match (&self.pending, self.running) {
             (Some((ask, _)), _) => Line::from(vec![
                 bold(question(&ask.name)),
@@ -725,20 +726,12 @@ impl App {
                 alternative(self.busy).name(),
             ))),
             (None, _) => {
-                let room = area.width.saturating_sub(3) as usize;
-                let chars: Vec<char> = self.input.chars().collect();
-                let shown: String = chars[chars.len().saturating_sub(room)..]
-                    .iter()
-                    .map(|&c| if c == '\n' { '↵' } else { c })
-                    .collect();
-                if !self.notes_focus {
-                    let x = area.x + 2 + shown.chars().count() as u16;
-                    f.set_cursor_position((x, area.y));
-                }
-                Line::from(vec![
-                    Span::styled("> ", Style::new().fg(Color::Cyan)),
-                    Span::raw(shown),
-                ])
+                let [mark, text] =
+                    Layout::horizontal([Constraint::Length(2), Constraint::Fill(1)]).areas(area);
+                f.render_widget(Span::styled("> ", Style::new().fg(Color::Cyan)), mark);
+                let focused = !self.notes_focus;
+                self.input.render(f, text, focused);
+                return;
             }
         };
         f.render_widget(Paragraph::new(line), area);
@@ -1156,7 +1149,7 @@ async fn main_loop(
 ) -> Result<()> {
     let mut keys = EventStream::new();
     loop {
-        terminal.draw(|f| app.borrow().draw(f))?;
+        terminal.draw(|f| app.borrow_mut().draw(f))?;
         let Some(input) = keys.next().await else {
             return Ok(());
         };
@@ -1168,32 +1161,22 @@ async fn main_loop(
                     continue;
                 }
                 Input::Key(key) if key.kind == KeyEventKind::Press => {
-                    if a.common_key(&key) || a.notes_key(&key) {
-                        continue;
-                    }
                     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
                     match key.code {
+                        // Ctrl-C clears the prompt, then quits; Ctrl-D quits when it is empty.
+                        KeyCode::Char('c') if ctrl && !a.input.is_empty() => {
+                            a.input.set("");
+                            continue;
+                        }
+                        KeyCode::Char('c') if ctrl => return Ok(()),
+                        _ => {}
+                    }
+                    if a.common_key(&key) || a.notes_key(&key) || a.prompt_key(key) {
+                        continue;
+                    }
+                    match key.code {
                         KeyCode::Char('d') if ctrl && a.input.is_empty() => return Ok(()),
-                        KeyCode::Char('c') if ctrl => {
-                            if a.input.is_empty() {
-                                return Ok(());
-                            }
-                            a.input.clear();
-                            continue;
-                        }
-                        KeyCode::Char('u') if ctrl => {
-                            a.input.clear();
-                            continue;
-                        }
-                        KeyCode::Char(c) if !ctrl => {
-                            a.input.push(c);
-                            continue;
-                        }
-                        KeyCode::Backspace => {
-                            a.input.pop();
-                            continue;
-                        }
-                        KeyCode::Enter => std::mem::take(&mut a.input),
+                        KeyCode::Enter => a.input.take(),
                         _ => continue,
                     }
                 }
@@ -1261,7 +1244,7 @@ async fn turn(
         // Redraws streamed text and the clock between keys.
         let mut tick = tokio::time::interval(Duration::from_millis(80));
         loop {
-            terminal.draw(|f| app.borrow().draw(f))?;
+            terminal.draw(|f| app.borrow_mut().draw(f))?;
             tokio::select! {
                 result = &mut run => break match result {
                     Ok(_) => Outcome::Done,
@@ -1293,9 +1276,10 @@ async fn turn(
         // Steering the turn never read goes back into the prompt, not lost.
         let mut back = std::mem::take(&mut a.steering);
         if !a.input.is_empty() {
-            back.push(std::mem::take(&mut a.input));
+            back.push(a.input.take());
         }
-        a.input = back.join(" ");
+        let back = back.join("\n\n");
+        a.input.set(&back);
     }
     match outcome {
         Outcome::Done => save(agent, before),

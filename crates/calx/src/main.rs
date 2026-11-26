@@ -1,4 +1,5 @@
 mod carrels;
+mod editor;
 mod marginalia;
 mod notes;
 mod status;

@@ -85,11 +85,19 @@ impl Marginalia {
         }
     }
 
+    /// The next prompt: a line, a paste of several lines, or lines joined
+    /// with a `\` at the end of each but the last.
     async fn next_line(&mut self) -> Option<String> {
         if let Some(line) = self.typed.pop_front() {
             return Some(line);
         }
-        self.lines.get_or_insert_with(spawn_reader).recv().await
+        let rx = self.lines.get_or_insert_with(spawn_reader);
+        let line = rx.recv().await?;
+        Some(if self.interactive {
+            gather(rx, line, true).await
+        } else {
+            line
+        })
     }
 
     /// Reads prompts and runs them until the user quits.
@@ -326,6 +334,9 @@ impl Marginalia {
                             arrived.notify_one();
                             continue;
                         };
+                        // A paste is one message. No `\` here: waiting for the next
+                        // line would hold up the turn.
+                        let text = if interactive { gather(rx, text, false).await } else { text };
                         if !interactive || (asking.get() && !is_handoff(&text)) {
                             typed.borrow_mut().push_back(text);
                             arrived.notify_one();
@@ -506,6 +517,41 @@ fn spawn_reader() -> mpsc::UnboundedReceiver<String> {
         }
     });
     rx
+}
+
+/// Lines of a paste reach stdin together; two presses of Enter are always
+/// further apart than this.
+const PASTE_GAP: std::time::Duration = std::time::Duration::from_millis(15);
+
+/// Adds to `text` the rest of a paste it starts, and with `continuation`,
+/// the next line after each that ends with `\`, as in a shell.
+async fn gather(
+    rx: &mut mpsc::UnboundedReceiver<String>,
+    mut text: String,
+    continuation: bool,
+) -> String {
+    loop {
+        if continuation && let Some(rest) = text.strip_suffix('\\') {
+            text = format!("{rest}\n");
+            print!("{DIM}   …  {RESET}");
+            let _ = std::io::stdout().flush();
+            match rx.recv().await {
+                Some(line) => text.push_str(&line),
+                None => return text,
+            }
+            continue;
+        }
+        tokio::time::sleep(PASTE_GAP).await;
+        let mut more = false;
+        while let Ok(line) = rx.try_recv() {
+            text.push('\n');
+            text.push_str(&line);
+            more = true;
+        }
+        if !more {
+            return text;
+        }
+    }
 }
 
 fn is_handoff(line: &str) -> bool {
