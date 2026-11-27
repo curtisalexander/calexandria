@@ -145,7 +145,7 @@ including what the tools read, so treat it as private as your files.
 **Memory.** calx remembers short notes between sessions, in `sessions.db`:
 about you, everywhere, or about this project (the git root). The model can
 suggest one with its `remember` tool, and calx asks you before saving every
-one, even with `-y`, and with no "always" option. When the session has read
+one, even with `-y`, and with no "always" option. Answer `e` to rewrite it in your own words first; the model is told what you saved. When the session has read
 files or command output first, it warns you to check the memory is yours and
 not text it read, and it marks the memory that way. Approved memories go into
 the system prompt of later sessions. The model can also search memories

@@ -291,6 +291,7 @@ mod tests {
             summary: summary.into(),
             preview: None,
             exposure: Exposure::default(),
+            editable: None,
         }
     }
 

@@ -54,6 +54,23 @@ pub struct Approval {
     /// What the call would change, such as a diff, when the tool can tell.
     pub preview: Option<String>,
     pub exposure: Exposure,
+    /// Text the user may rewrite before saying yes, such as a memory's.
+    pub editable: Option<String>,
+}
+
+/// The user's answer to an [`Approval`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Answer {
+    Yes,
+    No,
+    /// Yes, with the user's text in place of [`Approval::editable`].
+    Edited(String),
+}
+
+impl From<bool> for Answer {
+    fn from(yes: bool) -> Self {
+        if yes { Answer::Yes } else { Answer::No }
+    }
 }
 
 impl Agent {
@@ -76,7 +93,7 @@ impl Agent {
         &mut self,
         prompt: &str,
         on_event: &mut dyn FnMut(Event),
-        approve: &mut impl AsyncFnMut(Approval) -> bool,
+        approve: &mut impl AsyncFnMut(Approval) -> Answer,
         steer: &mut dyn FnMut() -> Vec<String>,
     ) -> Result<String> {
         self.items.push(Item::User {
@@ -218,7 +235,7 @@ impl Agent {
         call: &ToolCall,
         skip: bool,
         on_event: &mut dyn FnMut(Event),
-        approve: &mut impl AsyncFnMut(Approval) -> bool,
+        approve: &mut impl AsyncFnMut(Approval) -> Answer,
     ) -> String {
         let name = call.name.clone();
         let mut args: Result<Value, _> = serde_json::from_str(&call.arguments);
@@ -250,25 +267,47 @@ impl Agent {
                 true,
             ),
             _ if skip => (SKIPPED.to_string(), true),
-            (Some(tool), Ok(args)) => {
-                let approved = !tool.needs_approval()
-                    || approve(Approval {
+            (Some(tool), Ok(mut args)) => {
+                let editable = (name == crate::memory::REMEMBER)
+                    .then(|| args["text"].as_str().unwrap_or_default().to_string());
+                let answer = if tool.needs_approval() {
+                    approve(Approval {
                         seq,
                         name: name.clone(),
                         summary,
                         preview: tool.preview(&args),
                         exposure: tool.exposure(),
+                        editable,
                     })
-                    .await;
-                if !approved {
-                    (DECLINED.to_string(), true)
+                    .await
                 } else {
+                    Answer::Yes
+                };
+                // The model learns what the user changed, so it does not
+                // go on believing its own wording was saved.
+                let edited = match answer {
+                    Answer::No => None,
+                    Answer::Yes => Some(None),
+                    Answer::Edited(text) => {
+                        args["text"] = text.clone().into();
+                        Some(Some(text))
+                    }
+                };
+                if let Some(edited) = edited {
                     started = Instant::now();
                     match tokio::task::spawn_blocking(move || tool.run(args)).await {
-                        Ok(Ok(output)) => (output, false),
+                        Ok(Ok(output)) => match edited {
+                            Some(text) => (
+                                format!("{output} The user rewrote it before saving it as: {text}"),
+                                false,
+                            ),
+                            None => (output, false),
+                        },
                         Ok(Err(e)) => (format!("Error: {e:#}"), true),
                         Err(e) => (format!("Error: the tool crashed: {e}"), true),
                     }
+                } else {
+                    (DECLINED.to_string(), true)
                 }
             }
         };

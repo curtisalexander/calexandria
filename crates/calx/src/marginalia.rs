@@ -7,7 +7,7 @@ use std::collections::{HashSet, VecDeque};
 use std::io::{BufRead, IsTerminal, Write};
 
 use anyhow::Result;
-use calx_core::agent::{Agent, Approval, DECLINED, SKIPPED};
+use calx_core::agent::{Agent, Answer, Approval, DECLINED, SKIPPED};
 use calx_core::approvals::{Rule, Rules, always_asks};
 use calx_core::message::Event;
 
@@ -294,14 +294,14 @@ impl Marginalia {
             }
             let _ = out.flush();
         };
-        let mut approve = async |ask: Approval| -> bool {
+        let mut approve = async |ask: Approval| -> Answer {
             let every_time = always_asks(&ask.name);
             if !every_time
                 && (yes
                     || always.borrow().contains(&ask.name)
                     || rules.borrow().allowing(&ask).is_some())
             {
-                return true;
+                return Answer::Yes;
             }
             let rule = Rule::suggest(rules.borrow().project(), &ask);
             let for_project = rule
@@ -336,11 +336,16 @@ impl Marginalia {
             } else {
                 format!("{BOLD}a{RESET} always this session  ")
             };
+            let edit_it = if ask.editable.is_some() {
+                format!("{BOLD}e{RESET} edit first  ")
+            } else {
+                String::new()
+            };
             loop {
                 let _ = write!(
                     out,
                     "\n{BODY}{BOLD}{question}{RESET}  {BOLD}y{RESET} yes  {BOLD}n{RESET} no  \
-                     {always_this}{for_project}{BOLD}?{RESET} why  "
+                     {edit_it}{always_this}{for_project}{BOLD}?{RESET} why  "
                 );
                 let _ = out.flush();
                 asking.set(true);
@@ -355,10 +360,10 @@ impl Marginalia {
                 };
                 asking.set(false);
                 match answer.trim().to_lowercase().as_str() {
-                    "y" | "yes" => return true,
+                    "y" | "yes" => return Answer::Yes,
                     "a" | "always" if !every_time => {
                         always.borrow_mut().insert(ask.name.clone());
-                        return true;
+                        return Answer::Yes;
                     }
                     "p" if rule.is_some() => {
                         let rule = rule.clone().expect("checked above");
@@ -377,7 +382,29 @@ impl Marginalia {
                                 );
                             }
                         }
-                        return true;
+                        return Answer::Yes;
+                    }
+                    "e" | "edit" if ask.editable.is_some() => {
+                        let _ = write!(
+                            out,
+                            "{BODY}{DIM}new text, or Enter to go back:{RESET}\n{BODY}"
+                        );
+                        let _ = out.flush();
+                        asking.set(true);
+                        let text = loop {
+                            if let Some(text) = typed.borrow_mut().pop_front() {
+                                break text;
+                            }
+                            if ended.get() {
+                                break String::new();
+                            }
+                            arrived.notified().await;
+                        };
+                        asking.set(false);
+                        let text = text.trim();
+                        if !text.is_empty() {
+                            return Answer::Edited(text.to_string());
+                        }
                     }
                     "?" | "why" => {
                         let why = status::why(&ask.name, ask.exposure);
@@ -385,7 +412,7 @@ impl Marginalia {
                             let _ = writeln!(out, "{BODY}{DIM}{text}{RESET}");
                         }
                     }
-                    "" | "n" | "no" => return false,
+                    "" | "n" | "no" => return Answer::No,
                     // A message instead of an answer declines the call and steers.
                     _ => {
                         steering.borrow_mut().push(answer.trim().to_string());
@@ -393,7 +420,7 @@ impl Marginalia {
                             out,
                             "{BODY}{YELLOW}↳ declined; calx reads your message next{RESET}"
                         );
-                        return false;
+                        return Answer::No;
                     }
                 }
             }

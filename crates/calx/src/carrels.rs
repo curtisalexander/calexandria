@@ -8,7 +8,7 @@ use std::collections::{HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use calx_core::agent::{Agent, Approval, DECLINED, MAX_STEPS, SKIPPED};
+use calx_core::agent::{Agent, Answer, Approval, DECLINED, MAX_STEPS, SKIPPED};
 use calx_core::approvals::{Rule, Rules, always_asks};
 use calx_core::message::{Event, Exposure, Item, Usage};
 use crossterm::event::{
@@ -270,7 +270,11 @@ pub struct App {
     scroll: u16,
     layout: usize,
     side: Panel,
-    pending: Option<(Approval, oneshot::Sender<bool>)>,
+    pending: Option<(Approval, oneshot::Sender<Answer>)>,
+    /// Whether the prompt holds the pending memory's text, being rewritten.
+    editing: bool,
+    /// The prompt's text, set aside while a memory is edited.
+    held: String,
     show_why: bool,
     /// What Enter does while a turn runs; Alt-Enter does [`alternative`].
     pub busy: Busy,
@@ -322,6 +326,8 @@ impl App {
             layout: 0,
             side: Panel::Diff,
             pending: None,
+            editing: false,
+            held: String::new(),
             show_why: false,
             busy: Busy::default(),
             steering: Vec::new(),
@@ -576,7 +582,7 @@ impl App {
         }
     }
 
-    fn ask(&mut self, ask: Approval, answer: oneshot::Sender<bool>) {
+    fn ask(&mut self, ask: Approval, answer: oneshot::Sender<Answer>) {
         if let Some(row) = self.row(ask.seq) {
             row.state = State::Waiting;
             row.preview = ask.preview.clone();
@@ -592,6 +598,10 @@ impl App {
     /// Answers the pending approval; `always` also allows the tool for the
     /// rest of the session.
     fn answer(&mut self, yes: bool, always: bool) {
+        self.reply(yes.into(), always);
+    }
+
+    fn reply(&mut self, answer: Answer, always: bool) {
         if let Some((ask, tx)) = self.pending.take() {
             if always {
                 self.always.insert(ask.name.clone());
@@ -599,7 +609,7 @@ impl App {
             if let Some(row) = self.row(ask.seq) {
                 row.state = State::Running;
             }
-            let _ = tx.send(yes);
+            let _ = tx.send(answer);
         }
     }
 
@@ -730,9 +740,42 @@ impl App {
         if self.common_key(&key) || self.notes_key(&key) || self.prefs_key(&key) {
             return false;
         }
+        if self.editing {
+            match key.code {
+                // Back to the question; what was typed before comes back.
+                KeyCode::Esc => {
+                    self.editing = false;
+                    let typed = std::mem::take(&mut self.held);
+                    self.input.set(&typed);
+                }
+                KeyCode::Enter if !key.modifiers.contains(KeyModifiers::ALT) => {
+                    let text = self.input.take().trim().to_string();
+                    self.editing = false;
+                    let typed = std::mem::take(&mut self.held);
+                    self.input.set(&typed);
+                    if !text.is_empty() {
+                        self.reply(Answer::Edited(text), false);
+                    }
+                }
+                _ => self.input.key(key),
+            }
+            return false;
+        }
         if self.pending.is_some() {
             match key.code {
                 KeyCode::Esc => return true,
+                KeyCode::Char('e') => {
+                    let text = self
+                        .pending
+                        .as_ref()
+                        .and_then(|(ask, _)| ask.editable.clone());
+                    if let Some(text) = text {
+                        // The prompt edits the memory; what was typed waits.
+                        self.held = self.input.take();
+                        self.input.set(&text);
+                        self.editing = true;
+                    }
+                }
                 KeyCode::Char('y') => self.answer(true, false),
                 KeyCode::Char('a') if !self.pending_always_asks() => self.answer(true, true),
                 KeyCode::Char('p') => self.allow_in_project(),
@@ -942,6 +985,13 @@ impl App {
     fn input_line(&mut self, f: &mut Frame, area: Rect) {
         let rule = self.suggested_rule();
         let line = match (&self.pending, self.running) {
+            (Some(_), _) if self.editing => {
+                let [mark, text] =
+                    Layout::horizontal([Constraint::Length(2), Constraint::Fill(1)]).areas(area);
+                f.render_widget(Span::styled("✎ ", Style::new().fg(CLAY)), mark);
+                self.input.render(f, text, true);
+                return;
+            }
             (Some((ask, _)), _) => {
                 let mut spans = vec![
                     bold(question(&ask.name)),
@@ -951,6 +1001,9 @@ impl App {
                     bold("n"),
                     Span::raw(" no  "),
                 ];
+                if ask.editable.is_some() {
+                    spans.extend([bold("e"), Span::raw(" edit first  ")]);
+                }
                 if !always_asks(&ask.name) {
                     spans.extend([bold("a"), Span::raw(" always this session  ")]);
                 }
@@ -2047,18 +2100,18 @@ async fn turn(
     }
     let outcome = {
         let mut on_event = |event: Event| app.borrow_mut().observe(event);
-        let mut approve = async |ask: Approval| -> bool {
+        let mut approve = async |ask: Approval| -> Answer {
             {
                 let a = app.borrow();
                 if !always_asks(&ask.name)
                     && (a.yes || a.always.contains(&ask.name) || a.rules.allowing(&ask).is_some())
                 {
-                    return true;
+                    return Answer::Yes;
                 }
             }
             let (tx, rx) = oneshot::channel();
             app.borrow_mut().ask(ask, tx);
-            rx.await.unwrap_or(false)
+            rx.await.unwrap_or(Answer::No)
         };
         let mut steer = || std::mem::take(&mut app.borrow_mut().steering);
         let run = agent.run(prompt, &mut on_event, &mut approve, &mut steer);
@@ -2088,6 +2141,11 @@ async fn turn(
     let mut a = app.borrow_mut();
     a.running = None;
     a.pending = None;
+    if a.editing {
+        a.editing = false;
+        let typed = std::mem::take(&mut a.held);
+        a.input.set(&typed);
+    }
     let done = matches!(outcome, Outcome::Done);
     if done {
         // Steering that came after the turn's last pause goes next.
