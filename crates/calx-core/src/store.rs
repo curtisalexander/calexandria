@@ -6,6 +6,7 @@
 //! (Windows caps one keychain entry at 2,560 bytes, and a ChatGPT access token
 //! alone is over 2,000), and a copy of the file is useless without the key.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -29,6 +30,9 @@ pub const KEY_ENV: &str = "CALX_AUTH_KEY";
 struct Secrets {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     chatgpt: Option<Credential>,
+    /// API keys by the name the user saved them under (`calx key set`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    api_keys: BTreeMap<String, String>,
 }
 
 /// The file on disk: a nonce and the encrypted, serialized `Secrets`.
@@ -62,10 +66,40 @@ impl CredentialStore {
         &self.path
     }
 
+    /// The ChatGPT sign-in, if any.
     pub fn load(&self) -> Result<Option<Credential>> {
+        Ok(self.load_secrets()?.chatgpt)
+    }
+
+    /// Saves the ChatGPT sign-in, or removes it with `None`, keeping the rest.
+    pub fn save(&self, credential: Option<&Credential>) -> Result<()> {
+        self.update(|s| s.chatgpt = credential.cloned())
+    }
+
+    pub fn api_key(&self, name: &str) -> Result<Option<String>> {
+        Ok(self.load_secrets()?.api_keys.remove(name))
+    }
+
+    /// Saves an API key under `name`, or removes it with `None`.
+    pub fn set_api_key(&self, name: &str, key: Option<&str>) -> Result<()> {
+        self.update(|s| match key {
+            Some(key) => {
+                s.api_keys.insert(name.to_string(), key.to_string());
+            }
+            None => {
+                s.api_keys.remove(name);
+            }
+        })
+    }
+
+    pub fn api_key_names(&self) -> Result<Vec<String>> {
+        Ok(self.load_secrets()?.api_keys.into_keys().collect())
+    }
+
+    fn load_secrets(&self) -> Result<Secrets> {
         let text = match std::fs::read_to_string(&self.path) {
             Ok(text) => text,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Secrets::default()),
             Err(e) => {
                 return Err(e).with_context(|| format!("could not read {}", self.path.display()));
             }
@@ -74,8 +108,8 @@ impl CredentialStore {
             // A file from before encryption: read it, then encrypt it in place.
             let secrets: Secrets = serde_json::from_str(&text)
                 .with_context(|| format!("could not parse {}", self.path.display()))?;
-            self.save(secrets.chatgpt.as_ref())?;
-            return Ok(secrets.chatgpt);
+            self.save_secrets(&secrets)?;
+            return Ok(secrets);
         };
         let key = self.key(false)?.with_context(|| {
             format!(
@@ -83,17 +117,28 @@ impl CredentialStore {
                 self.path.display()
             )
         })?;
-        let secrets: Secrets = serde_json::from_slice(&open(&key, &sealed)?)
-            .context("the decrypted credentials are not valid")?;
-        Ok(secrets.chatgpt)
+        serde_json::from_slice(&open(&key, &sealed)?)
+            .context("the decrypted credentials are not valid")
     }
 
-    pub fn save(&self, credential: Option<&Credential>) -> Result<()> {
-        let key = self.key(true)?.expect("a key is created when missing");
-        let secrets = Secrets {
-            chatgpt: credential.cloned(),
+    /// Reads, changes, and saves the secrets, so changing one keeps the others.
+    fn update(&self, change: impl FnOnce(&mut Secrets)) -> Result<()> {
+        // The key first, creating it if needed, so a keychain that refuses
+        // fails here instead of after the file was judged unreadable.
+        self.key(true)?;
+        let mut secrets = match self.load_secrets() {
+            Ok(secrets) => secrets,
+            // An undecryptable file cannot be recovered; start over.
+            Err(e) if e.to_string().contains("could not decrypt") => Secrets::default(),
+            Err(e) => return Err(e),
         };
-        let sealed = seal(&key, &serde_json::to_vec(&secrets)?)?;
+        change(&mut secrets);
+        self.save_secrets(&secrets)
+    }
+
+    fn save_secrets(&self, secrets: &Secrets) -> Result<()> {
+        let key = self.key(true)?.expect("a key is created when missing");
+        let sealed = seal(&key, &serde_json::to_vec(secrets)?)?;
         crate::write_private(&self.path, &serde_json::to_string_pretty(&sealed)?)
     }
 
@@ -240,11 +285,33 @@ mod tests {
     }
 
     #[test]
+    fn api_keys_survive_a_token_refresh() {
+        let dir = temp_dir("keys");
+        let store = store_with_key(&dir, [7; 32]);
+        store.set_api_key("openrouter", Some("sk-or-123")).unwrap();
+        store.save(Some(&credential())).unwrap();
+        assert_eq!(
+            store.api_key("openrouter").unwrap().as_deref(),
+            Some("sk-or-123")
+        );
+        store.save(None).unwrap();
+        assert_eq!(store.api_key_names().unwrap(), vec!["openrouter"]);
+        store.set_api_key("openrouter", None).unwrap();
+        assert!(store.api_key("openrouter").unwrap().is_none());
+        assert!(
+            !std::fs::read_to_string(store.path())
+                .unwrap()
+                .contains("sk-or")
+        );
+    }
+
+    #[test]
     fn encrypts_a_plain_file_from_an_earlier_version() {
         let dir = temp_dir("migrate");
         let store = store_with_key(&dir, [7; 32]);
         let plain = serde_json::to_string(&Secrets {
             chatgpt: Some(credential()),
+            ..Default::default()
         })
         .unwrap();
         std::fs::write(store.path(), plain).unwrap();

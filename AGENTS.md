@@ -9,6 +9,10 @@ never pip. It must run on Windows, macOS, and Linux.
 
 - `crates/calx-core`: auth, providers, and message types. Keep provider wire
   formats inside their provider module; the rest of the code uses `message.rs`.
+- `crates/calx-core/src/provider.rs`: the request the agent sends and the
+  `Client` that sends it, over the Responses API (`responses.rs`) or Chat
+  Completions (`chat.rs`). How a request authenticates is `Auth` in `auth.rs`;
+  a new sign-in, such as a company gateway's, is a new `Auth` variant.
 - `crates/calx-core/src/agent.rs`: the agent loop. Tools live in `tools/` and
   implement the `Tool` trait.
 - `crates/calx-core/src/environment.rs`: where tools act. Tools must do all file
@@ -45,7 +49,7 @@ cargo test
 
 Build and smoke-test the wheel: `uv tool install --force . && calx --version`.
 
-`CALX_HOME`, `CALX_AUTH_KEY`, `CALX_AUTH_BASE_URL`, and `CALX_OPENAI_BASE_URL`
+`CALX_HOME`, `CALX_AUTH_KEY`, `CALX_AUTH_BASE_URL`, and `CALX_BASE_URL`
 point calx at a scratch directory, a key that bypasses the OS keychain, and test
 servers, so login and streaming can be exercised
 without a real account.

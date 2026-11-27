@@ -4,52 +4,15 @@ use anyhow::{Context, Result, bail};
 use futures_util::StreamExt;
 use serde_json::{Value, json};
 
-use crate::auth::ChatGptAuth;
 use crate::message::{Event, Item, ToolCall, Usage};
+use crate::provider::{Http, Reply, Request};
 use crate::sse::SseParser;
-use crate::tools::ToolSpec;
-
-const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
-
-pub struct Request<'a> {
-    pub model: &'a str,
-    pub system: &'a str,
-    pub items: &'a [Item],
-    pub tools: &'a [ToolSpec],
-    /// Reasoning effort, such as "low", "medium", or "high".
-    pub effort: Option<&'a str>,
-    /// Groups requests from one conversation so the server can reuse its prompt cache.
-    pub session_id: &'a str,
-}
-
-pub struct Reply {
-    pub items: Vec<Item>,
-    pub usage: Usage,
-}
 
 pub struct ResponsesClient {
-    http: reqwest::Client,
-    base_url: String,
-    auth: ChatGptAuth,
+    pub(crate) http: Http,
 }
 
 impl ResponsesClient {
-    /// `CALX_OPENAI_BASE_URL` overrides the endpoint, such as for a proxy or a test server.
-    pub fn new(auth: ChatGptAuth) -> Self {
-        let base_url =
-            std::env::var("CALX_OPENAI_BASE_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
-        let user_agent = format!("calx/{}", env!("CARGO_PKG_VERSION"));
-        let http = reqwest::Client::builder()
-            .user_agent(user_agent)
-            .build()
-            .expect("the HTTP client configuration is valid");
-        Self {
-            http,
-            base_url,
-            auth,
-        }
-    }
-
     /// Sends the conversation and streams the reply, calling `on_event` for each piece.
     pub async fn stream(
         &self,
@@ -57,40 +20,7 @@ impl ResponsesClient {
         mut on_event: impl FnMut(Event),
     ) -> Result<Reply> {
         let body = request_body(request);
-        let mut retried = false;
-        let response = loop {
-            let token = self.auth.access_token().await?;
-            let response = self
-                .http
-                .post(format!("{}/responses", self.base_url))
-                .bearer_auth(token)
-                .header("accept", "text/event-stream")
-                .json(&body)
-                .send()
-                .await
-                .context("could not reach OpenAI")?;
-            if response.status() == reqwest::StatusCode::UNAUTHORIZED && !retried {
-                retried = true;
-                self.auth.refresh().await?;
-                continue;
-            }
-            break response;
-        };
-
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            let message = serde_json::from_str::<Value>(&body)
-                .ok()
-                .and_then(|v| v["error"]["message"].as_str().map(str::to_string))
-                .unwrap_or(body);
-            if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-                bail!(
-                    "{message}\nCheck your ChatGPT plan usage at https://chatgpt.com/settings/usage"
-                );
-            }
-            bail!("OpenAI returned {status}: {message}");
-        }
+        let response = self.http.post_stream("/responses", &body).await?;
 
         let mut parser = SseParser::default();
         let mut reply = Reply {

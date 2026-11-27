@@ -9,9 +9,9 @@ use std::io::BufRead;
 use anyhow::{Context, Result};
 use calx_core::agent::Agent;
 use calx_core::approvals::Rules;
-use calx_core::auth::{ChatGptAuth, CredentialStore, PendingLogin};
+use calx_core::auth::{API_KEY_ENV, Auth, ChatGptAuth, CredentialStore, PendingLogin};
 use calx_core::environment::{Environment, LocalEnvironment};
-use calx_core::responses::ResponsesClient;
+use calx_core::provider::{Api, Client, OPENAI_BASE_URL};
 use calx_core::session::Sessions;
 use calx_core::tools::Toolbox;
 use clap::{Parser, Subcommand};
@@ -31,13 +31,29 @@ struct Cli {
     /// Ask one question and exit. Without it, calx starts a conversation.
     prompt: Vec<String>,
 
-    /// The model to use.
-    #[arg(long, short, env = "CALX_MODEL", default_value = "gpt-6.2-sol")]
-    model: String,
+    /// The model to use. Default with the Responses API: gpt-6.2-sol.
+    #[arg(long, short, env = "CALX_MODEL")]
+    model: Option<String>,
 
-    /// Reasoning effort: none, low, medium, high, or xhigh.
-    #[arg(long, env = "CALX_EFFORT", default_value = "medium")]
-    effort: String,
+    /// Reasoning effort: none, low, medium, high, or xhigh. Default: medium
+    /// with the Responses API; with Chat Completions, none is sent.
+    #[arg(long, env = "CALX_EFFORT")]
+    effort: Option<String>,
+
+    /// The API the model server speaks: OpenAI's Responses API, or Chat
+    /// Completions, which Ollama, MLX, vLLM, OpenRouter, and most gateways speak.
+    #[arg(long, env = "CALX_API", value_enum, default_value_t = ApiArg::Responses)]
+    api: ApiArg,
+
+    /// The server's base URL, such as http://localhost:11434/v1 for Ollama.
+    /// Default with the Responses API: https://api.openai.com/v1.
+    #[arg(long, env = "CALX_BASE_URL")]
+    base_url: Option<String>,
+
+    /// Use the API key saved under this name (`calx key set NAME`) instead of
+    /// the ChatGPT sign-in. Without it, Chat Completions sends no key.
+    #[arg(long, env = "CALX_KEY", value_name = "NAME")]
+    key: Option<String>,
 
     /// Run file edits and shell commands without asking first.
     #[arg(long, short = 'y')]
@@ -65,6 +81,22 @@ struct Cli {
     panels: bool,
 }
 
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum ApiArg {
+    Responses,
+    Chat,
+}
+
+#[derive(Subcommand)]
+enum KeyCommand {
+    /// Save an API key under NAME; it is read from the terminal, hidden, or from stdin.
+    Set { name: String },
+    /// List the names of saved keys.
+    List,
+    /// Remove a saved key.
+    Remove { name: String },
+}
+
 #[derive(Subcommand)]
 enum Command {
     /// Sign in with ChatGPT, so calx uses your ChatGPT plan.
@@ -73,6 +105,9 @@ enum Command {
     Logout,
     /// List recent sessions.
     Sessions,
+    /// Save, list, or remove API keys, kept encrypted with a key in the OS keychain.
+    #[command(subcommand)]
+    Key(KeyCommand),
     /// List the approvals saved with `p` at an approval prompt.
     Rules {
         /// Remove rule N, as numbered in the list.
@@ -88,6 +123,7 @@ async fn main() -> Result<()> {
         Some(Command::Login) => login().await,
         Some(Command::Logout) => logout(),
         Some(Command::Sessions) => list_sessions(),
+        Some(Command::Key(command)) => key(command),
         Some(Command::Rules { forget }) => rules(forget),
         None => chat(&cli).await,
     }
@@ -151,6 +187,118 @@ fn system_prompt(env: &dyn Environment) -> String {
         env.os(),
         env.working_dir()
     )
+}
+
+fn key(command: KeyCommand) -> Result<()> {
+    let store = CredentialStore::open()?;
+    match command {
+        KeyCommand::Set { name } => {
+            let key = read_secret(&format!("API key for {name}: "))?;
+            anyhow::ensure!(!key.is_empty(), "no key given");
+            store.set_api_key(&name, Some(&key))?;
+            println!("Saved key {name}. Use it with `calx --key {name}`.");
+        }
+        KeyCommand::List => {
+            let names = store.api_key_names()?;
+            if names.is_empty() {
+                println!("No saved keys. Add one with `calx key set NAME`.");
+            }
+            for name in names {
+                println!("{name}");
+            }
+        }
+        KeyCommand::Remove { name } => {
+            anyhow::ensure!(
+                store.api_key(&name)?.is_some(),
+                "there is no key named {name}"
+            );
+            store.set_api_key(&name, None)?;
+            println!("Removed key {name}.");
+        }
+    }
+    Ok(())
+}
+
+/// Reads a line without showing it when stdin is a terminal.
+fn read_secret(prompt: &str) -> Result<String> {
+    use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, read};
+    use std::io::{IsTerminal, Write};
+    if !std::io::stdin().is_terminal() {
+        let mut line = String::new();
+        std::io::stdin().lock().read_line(&mut line)?;
+        return Ok(line.trim().to_string());
+    }
+    eprint!("{prompt}");
+    std::io::stderr().flush()?;
+    crossterm::terminal::enable_raw_mode()?;
+    let mut text = String::new();
+    let result = loop {
+        match read() {
+            Ok(Event::Key(k)) if k.kind == KeyEventKind::Press => match k.code {
+                KeyCode::Enter => break Ok(()),
+                KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => {
+                    break Err(anyhow::anyhow!("cancelled"));
+                }
+                KeyCode::Char(c) => text.push(c),
+                KeyCode::Backspace => {
+                    text.pop();
+                }
+                _ => {}
+            },
+            Ok(Event::Paste(p)) => text.push_str(&p),
+            Ok(_) => {}
+            Err(e) => break Err(e.into()),
+        }
+    };
+    crossterm::terminal::disable_raw_mode()?;
+    eprintln!();
+    result.map(|()| text.trim().to_string())
+}
+
+/// The model client the flags choose.
+fn client(cli: &Cli) -> Result<(Client, String, Option<String>)> {
+    let api = match cli.api {
+        ApiArg::Responses => Api::Responses,
+        ApiArg::Chat => Api::Chat,
+    };
+    let base_url = match (&cli.base_url, api) {
+        (Some(url), _) => url.clone(),
+        (None, Api::Responses) => OPENAI_BASE_URL.to_string(),
+        (None, Api::Chat) => anyhow::bail!(
+            "Chat Completions needs --base-url (or CALX_BASE_URL), such as \
+             http://localhost:11434/v1 for Ollama or http://localhost:8080/v1 for mlx_lm.server"
+        ),
+    };
+    let auth = if let Ok(key) = std::env::var(API_KEY_ENV) {
+        Auth::Key {
+            name: API_KEY_ENV.into(),
+            key,
+        }
+    } else if let Some(name) = &cli.key {
+        let key = CredentialStore::open()?
+            .api_key(name)?
+            .with_context(|| format!("no key named {name}; save one with `calx key set {name}`"))?;
+        Auth::Key {
+            name: name.clone(),
+            key,
+        }
+    } else if api == Api::Responses {
+        Auth::ChatGpt(ChatGptAuth::load(CredentialStore::open()?)?)
+    } else {
+        Auth::None
+    };
+    let model = match (&cli.model, api) {
+        (Some(model), _) => model.clone(),
+        (None, Api::Responses) => "gpt-6.2-sol".to_string(),
+        (None, Api::Chat) => anyhow::bail!("name the model with -m, such as -m qwen3:8b"),
+    };
+    let effort = match (&cli.effort, api) {
+        (Some(e), _) if e == "none" => None,
+        (Some(e), _) => Some(e.clone()),
+        (None, Api::Responses) => Some("medium".to_string()),
+        (None, Api::Chat) => None,
+    };
+    Ok((Client::new(api, &base_url, auth), model, effort))
 }
 
 fn rules(forget: Option<usize>) -> Result<()> {
@@ -218,7 +366,7 @@ fn ago(ms: u64) -> String {
 }
 
 async fn chat(cli: &Cli) -> Result<()> {
-    let auth = ChatGptAuth::load(CredentialStore::open()?)?;
+    let (client, model, effort) = client(cli)?;
     let env = LocalEnvironment::current()?;
     let cwd = env.working_dir();
     let shell = env.shell_name().to_string();
@@ -239,11 +387,11 @@ async fn chat(cli: &Cli) -> Result<()> {
         None => (calx_core::new_id(), Vec::new()),
     };
     let mut agent = Agent {
-        client: ResponsesClient::new(auth),
+        client,
         system: system_prompt(env.as_ref()),
         toolbox: Toolbox::builtin(env),
-        model: cli.model.clone(),
-        effort: (cli.effort != "none").then(|| cli.effort.clone()),
+        model,
+        effort,
         session_id,
         items,
     };

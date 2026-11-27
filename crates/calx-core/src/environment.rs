@@ -88,7 +88,7 @@ pub enum Exit {
 }
 
 /// Environment variables the harness uses that commands must not see.
-const HIDDEN_VARS: &[&str] = &[crate::store::KEY_ENV];
+const HIDDEN_VARS: &[&str] = &[crate::store::KEY_ENV, crate::auth::API_KEY_ENV];
 
 /// This machine, as the current user.
 pub struct LocalEnvironment {

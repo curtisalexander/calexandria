@@ -7,7 +7,7 @@ use anyhow::{Result, bail};
 use serde_json::Value;
 
 use crate::message::{Event, Exposure, Item, ToolCall};
-use crate::responses::{Request, ResponsesClient};
+use crate::provider::{Client, Request};
 use crate::tools::Toolbox;
 
 /// Most model requests one prompt may take, so a confused model cannot loop forever.
@@ -22,7 +22,7 @@ pub const SKIPPED: &str =
     "Skipped: the user sent a message before this ran. Read it before calling tools again.";
 
 pub struct Agent {
-    pub client: ResponsesClient,
+    pub client: Client,
     pub toolbox: Toolbox,
     pub model: String,
     pub effort: Option<String>,

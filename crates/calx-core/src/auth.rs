@@ -286,6 +286,50 @@ fn html_escape(s: &str) -> String {
         .replace('>', "&gt;")
 }
 
+/// Supplies an API key directly, instead of one saved with `calx key set`.
+pub const API_KEY_ENV: &str = "CALX_API_KEY";
+
+/// How requests to a model server authenticate. A company gateway's own
+/// sign-in will be another variant: anything that can hand out a current
+/// bearer token, and refresh it when the server rejects one.
+pub enum Auth {
+    /// Sign in with ChatGPT (`calx login`).
+    ChatGpt(ChatGptAuth),
+    /// An API key; `name` is where it came from, for display.
+    Key { name: String, key: String },
+    /// No credentials, as for a model server on this machine.
+    None,
+}
+
+impl Auth {
+    /// The bearer token to send, if any.
+    pub async fn token(&self) -> Result<Option<String>> {
+        Ok(match self {
+            Auth::ChatGpt(auth) => Some(auth.access_token().await?),
+            Auth::Key { key, .. } => Some(key.clone()),
+            Auth::None => None,
+        })
+    }
+
+    /// Gets a fresh token after the server rejected one. Returns whether it
+    /// did, so the request is worth retrying.
+    pub async fn refresh(&self) -> Result<bool> {
+        match self {
+            Auth::ChatGpt(auth) => auth.refresh().await.map(|()| true),
+            Auth::Key { .. } | Auth::None => Ok(false),
+        }
+    }
+
+    /// For the user, without the secret: "ChatGPT", "key openrouter", "no key".
+    pub fn describe(&self) -> String {
+        match self {
+            Auth::ChatGpt(_) => "ChatGPT sign-in".into(),
+            Auth::Key { name, .. } => format!("key {name}"),
+            Auth::None => "no key".into(),
+        }
+    }
+}
+
 /// Hands out a valid ChatGPT access token, refreshing and saving it when it is
 /// about to expire.
 pub struct ChatGptAuth {

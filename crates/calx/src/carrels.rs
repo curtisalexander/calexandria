@@ -89,6 +89,8 @@ pub fn arrange(width: u16, layout: usize, side: Panel) -> Arrangement {
 /// What calx knows about itself, gathered before a turn borrows the agent.
 pub struct Info {
     pub model: String,
+    /// The API, server, and auth, such as "chat · http://localhost:11434/v1 · no key".
+    pub backend: String,
     pub effort: Option<String>,
     pub session_id: String,
     pub system: String,
@@ -117,6 +119,7 @@ impl Info {
             .sum();
         Self {
             model: agent.model.clone(),
+            backend: agent.client.describe(),
             effort: agent.effort.clone(),
             session_id: agent.session_id.clone(),
             system: agent.system.clone(),
@@ -1169,6 +1172,7 @@ impl App {
         always.sort();
         vec![
             row("model", i.model.clone()),
+            row("backend", i.backend.clone()),
             row("effort", i.effort.clone().unwrap_or("none".into())),
             row("approvals", if self.yes { "none (-y)".into() } else { "ask".into() }),
             row("always this session", if always.is_empty() { "–".into() } else { always.join(", ") }),
@@ -1190,7 +1194,7 @@ impl App {
             Line::default(),
             dim(format!("Rules for this project ({}): `calx rules` lists them all.", self.rules.project().display())).into(),
             Line::default(),
-            dim("Read-only for now. Set them with --model or CALX_MODEL, --effort or CALX_EFFORT, --while-busy or CALX_WHILE_BUSY, --prompt-keys or CALX_PROMPT_KEYS, -y, and CALX_SHELL.").into(),
+            dim("Read-only for now. Set them with --model or CALX_MODEL, --api, --base-url, and --key (CALX_API, CALX_BASE_URL, CALX_KEY), --effort or CALX_EFFORT, --while-busy or CALX_WHILE_BUSY, --prompt-keys or CALX_PROMPT_KEYS, -y, and CALX_SHELL.").into(),
         ]
     }
 }

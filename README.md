@@ -12,7 +12,10 @@ Early. Today calx can:
 
 - **Sign in with ChatGPT** (`calx login`), so requests use your ChatGPT plan's
   allowance instead of API credits. Tokens refresh on their own.
-- **Work as an agent** over OpenAI's Responses API: it streams the reply and a
+- **Use other model servers** over Chat Completions, which Ollama, LM Studio,
+  MLX (`mlx_lm.server`), vLLM, OpenRouter, and most company gateways speak,
+  with no key, or an API key saved encrypted with `calx key set`.
+- **Work as an agent** over OpenAI's Responses API or Chat Completions: it streams the reply and a
   summary of the model's reasoning, and calls tools until the task is done.
 - **Tools:** `read` (files and directories), `grep` and `find` (built on
   ripgrep's own crates, so they are as fast as `rg` and `fd`, skip hidden and
@@ -53,7 +56,21 @@ calx -p                          # the panel view; -c -p resumes into it
 calx -c                          # continue the latest session in this directory
 calx -r 4f02f1ac "and then?"     # resume a session by the start of its ID
 calx logout
+
+# Other model servers, over Chat Completions
+calx --api chat --base-url http://localhost:11434/v1 -m qwen3:8b       # Ollama
+calx --api chat --base-url http://localhost:8080/v1 -m mlx-community/Qwen3-8B-4bit
+calx key set openrouter          # paste the key; it is saved encrypted, never shown
+calx --api chat --base-url https://openrouter.ai/api/v1 --key openrouter -m openai/gpt-6.1-sol
+calx key list                    # names only; `calx key remove NAME` deletes one
 ```
+
+In fish, set defaults once with `set -Ux CALX_API chat`, `set -Ux CALX_BASE_URL
+http://localhost:11434/v1`, and `set -Ux CALX_MODEL qwen3:8b`; in bash or
+PowerShell, export the same variables. Chat Completions keeps no reasoning
+between requests, so calx shows a model's reasoning as it streams and leaves it
+out of later requests. With `--api responses` and `--key`, calx uses the
+Responses API with an OpenAI API key instead of your ChatGPT plan.
 
 You can type while calx works. By default a message *steers*: calx reads it
 at the next pause in the turn (after the current request or tool), skips the
@@ -104,16 +121,19 @@ into the terminal instead.
 
 | Setting | Flag | Environment variable | Default |
 |---|---|---|---|
-| Model | `-m`, `--model` | `CALX_MODEL` | `gpt-6.2-sol` |
-| Reasoning effort | `--effort` | `CALX_EFFORT` | `medium` |
+| Model | `-m`, `--model` | `CALX_MODEL` | `gpt-6.2-sol` (Responses only) |
+| Reasoning effort | `--effort` | `CALX_EFFORT` | `medium` (Responses), not sent (chat) |
+| API | `--api` | `CALX_API` | `responses` (or `chat`) |
+| Server base URL | `--base-url` | `CALX_BASE_URL` | `https://api.openai.com/v1` (Responses only) |
+| Saved API key to use | `--key` | `CALX_KEY` | ChatGPT sign-in (Responses), none (chat) |
+| An API key directly, hidden from commands | | `CALX_API_KEY` | |
 | Typing while calx works | `--while-busy` | `CALX_WHILE_BUSY` | `steer` (or `queue`, `stop`) |
 | Prompt keys in the panel view | `--prompt-keys` | `CALX_PROMPT_KEYS` | `plain` (or `vim`) |
 | Shell for the `shell` tool | | `CALX_SHELL` | bash, else PowerShell |
 | Encryption key, instead of the keychain | | `CALX_AUTH_KEY` | |
 | State directory | | `CALX_HOME` | `~/.calx` |
-| Responses API base URL | | `CALX_OPENAI_BASE_URL` | `https://api.openai.com/v1` |
 
-Your sign-in is saved encrypted in `~/.calx/auth.json`. The key is in your OS
+Your sign-in and API keys are saved encrypted in `~/.calx/auth.json`. The key is in your OS
 keychain: macOS Keychain, Windows Credential Manager, or the Linux Secret Service
 (GNOME Keyring or KWallet). On a machine without a keychain, such as a headless
 Linux server, set `CALX_AUTH_KEY` to a base64 string of 32 random bytes
@@ -130,8 +150,7 @@ the Keychain to ask once after each update whether calx may use its key.
 ## Roadmap
 
 1. Editing approval rules from the panel view.
-2. More model backends: Chat Completions (local MLX, Ollama, work gateways),
-   API keys, and a configurable OAuth flow for work.
+2. The work gateway's browser sign-in, with its token refreshed in the background.
 3. Terminal UI next steps: a Trace view of every request in a turn, and
    editable Prefs.
 4. Memory, and extensions written in Python.
