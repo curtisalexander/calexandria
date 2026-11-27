@@ -119,12 +119,27 @@ fn request_body(request: &Request<'_>) -> Value {
     body
 }
 
+const THINK_START: &str = "<think>";
+const THINK_END: &str = "</think>";
+
+/// The length of the longest end of `text` that is the start of `tag`.
+fn partial_tag(text: &str, tag: &str) -> usize {
+    (1..tag.len())
+        .rev()
+        .find(|&n| text.ends_with(&tag[..n]))
+        .unwrap_or(0)
+}
+
 /// Builds a reply from streamed chunks, in which a tool call arrives in
 /// pieces keyed by its index: the ID and name first, then the arguments.
 #[derive(Default)]
 struct Assembler {
     reasoning: String,
     text: String,
+    /// Reply text not yet sorted into text and `<think>` reasoning, kept
+    /// while it might end in part of a tag.
+    unsorted: String,
+    thinking: bool,
     calls: Vec<ToolCall>,
     usage: Usage,
     finished: bool,
@@ -159,8 +174,8 @@ impl Assembler {
             on_event(Event::ReasoningDelta(r.to_string()));
         }
         if let Some(text) = delta["content"].as_str().filter(|t| !t.is_empty()) {
-            self.text.push_str(text);
-            on_event(Event::TextDelta(text.to_string()));
+            self.unsorted.push_str(text);
+            self.sort(false, on_event);
         }
         for part in delta["tool_calls"].as_array().into_iter().flatten() {
             let index = match part["index"].as_u64() {
@@ -193,16 +208,71 @@ impl Assembler {
             Some(reason @ ("length" | "content_filter")) => {
                 bail!("the reply stopped early ({reason})")
             }
-            Some(_) => self.finished = true,
+            Some(_) => {
+                self.finished = true;
+                self.sort(true, on_event);
+            }
             None => {}
         }
         Ok(())
     }
 
-    fn finish(self) -> Result<Reply> {
+    /// Moves reply text into text or reasoning: local reasoning models such
+    /// as Qwen and DeepSeek put their thinking in the reply between
+    /// `<think>` and `</think>`. Until `end`, it keeps back what could be
+    /// the start of a tag split across chunks.
+    fn sort(&mut self, end: bool, on_event: &mut impl FnMut(Event)) {
+        loop {
+            let tag = if self.thinking {
+                THINK_END
+            } else {
+                THINK_START
+            };
+            let (out, found) = match self.unsorted.find(tag) {
+                Some(at) => {
+                    let out: String = self.unsorted.drain(..at).collect();
+                    self.unsorted.drain(..tag.len());
+                    (out, true)
+                }
+                None => {
+                    let keep = if end {
+                        0
+                    } else {
+                        partial_tag(&self.unsorted, tag)
+                    };
+                    let at = self.unsorted.len() - keep;
+                    (self.unsorted.drain(..at).collect(), false)
+                }
+            };
+            if !out.is_empty() {
+                if self.thinking {
+                    self.reasoning.push_str(&out);
+                    on_event(Event::ReasoningDelta(out));
+                } else {
+                    self.text.push_str(&out);
+                    on_event(Event::TextDelta(out));
+                }
+            }
+            if !found {
+                return;
+            }
+            self.thinking = !self.thinking;
+        }
+    }
+
+    fn finish(mut self) -> Result<Reply> {
         if !self.finished {
             bail!("the reply stream ended before the reply was complete");
         }
+        self.sort(true, &mut |_| {});
+        // Some chat templates open the think block themselves, so the reply
+        // has only the closing tag: what comes before it was reasoning.
+        if let Some(at) = self.text.find(THINK_END) {
+            let thought: String = self.text.drain(..at + THINK_END.len()).collect();
+            self.reasoning.push_str(thought.trim_end_matches(THINK_END));
+        }
+        self.text = self.text.trim_start().to_string();
+        self.reasoning = self.reasoning.trim().to_string();
         let mut items = Vec::new();
         if !self.reasoning.is_empty() {
             items.push(Item::Reasoning {
@@ -342,6 +412,50 @@ mod tests {
             ]
         );
         assert!(matches!(&reply.items[1], Item::Assistant { text, .. } if text == "Reading "));
+    }
+
+    #[test]
+    fn think_tags_become_reasoning_even_split_across_chunks() {
+        let run = |chunks: &[&str]| {
+            let mut a = Assembler::default();
+            let mut shown = (String::new(), String::new());
+            let mut on_event = |e: Event| match e {
+                Event::ReasoningDelta(d) => shown.0.push_str(&d),
+                Event::TextDelta(d) => shown.1.push_str(&d),
+                _ => {}
+            };
+            for c in chunks {
+                a.push(&json!({"choices":[{"delta":{"content":c}}]}), &mut on_event)
+                    .unwrap();
+            }
+            a.push(
+                &json!({"choices":[{"delta":{},"finish_reason":"stop"}]}),
+                &mut on_event,
+            )
+            .unwrap();
+            let reply = a.finish().unwrap();
+            let get = |want: &str| {
+                reply.items.iter().find_map(|i| match (i, want) {
+                    (Item::Reasoning { summary, .. }, "r") => Some(summary.clone()),
+                    (Item::Assistant { text, .. }, "t") => Some(text.clone()),
+                    _ => None,
+                })
+            };
+            (get("r"), get("t"), shown)
+        };
+        let (r, t, shown) = run(&["<thi", "nk>plan it", "</th", "ink>\n\nAnswer: 4 < 5"]);
+        assert_eq!(r.as_deref(), Some("plan it"));
+        assert_eq!(t.as_deref(), Some("Answer: 4 < 5"));
+        assert_eq!(shown, ("plan it".into(), "\n\nAnswer: 4 < 5".into()));
+        // A template that opened the block itself: only the closing tag comes.
+        let (r, t, _) = run(&["hmm, two", "</think>", "Two."]);
+        assert_eq!(
+            (r.as_deref(), t.as_deref()),
+            (Some("hmm, two"), Some("Two."))
+        );
+        // No tags, and a lone < at the end: all text.
+        let (r, t, _) = run(&["a <b", " and <"]);
+        assert_eq!((r, t.as_deref()), (None, Some("a <b and <")));
     }
 
     #[test]
