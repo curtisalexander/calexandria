@@ -166,6 +166,15 @@ and `s` saves them as defaults in `~/.calx/settings.json`. The model and
 effort are saved for that server only, so a local model is never sent to
 OpenAI. Approvals are never saved. A flag or variable below overrides a saved default.
 
+**Context window.** calx asks the server for the model's context window:
+OpenRouter, vLLM, LM Studio, and llama.cpp list it under `/models`, and Ollama
+under `/api/show` (its `num_ctx` when the model sets one, which is what Ollama
+actually runs with). OpenAI's API does not report it, so with ChatGPT or an
+OpenAI key the views show 400k as *assumed* until you set it with
+`--context-window 272k` or in Prefs, which saves it for that model. Unless you
+set `--compact-at`, compaction starts at three quarters of a window smaller
+than about 270k, so a small local model compacts before it overflows.
+
 | Setting | Flag | Environment variable | Default |
 |---|---|---|---|
 | Model | `-m`, `--model` | `CALX_MODEL` | `gpt-6.2-sol` (Responses only) |
@@ -177,7 +186,8 @@ OpenAI. Approvals are never saved. A flag or variable below overrides a saved de
 | An API key directly, hidden from commands | | `CALX_API_KEY` | |
 | Typing while calx works | `--while-busy` | `CALX_WHILE_BUSY` | `steer` (or `queue`, `stop`) |
 | Prompt keys in the panel view | `--prompt-keys` | `CALX_PROMPT_KEYS` | `plain` (or `vim`) |
-| Compact the context at this many tokens | `--compact-at` | `CALX_COMPACT_AT` | `200000` (`0` never) |
+| Compact the context at this many tokens | `--compact-at` | `CALX_COMPACT_AT` | `200000`, or ¾ of a smaller window (`0` never) |
+| The model's context window | `--context-window` | `CALX_CONTEXT_WINDOW` | what the server reports, else 400k assumed |
 | Shell for the `shell` tool | | `CALX_SHELL` | bash, else PowerShell |
 | Encryption key, instead of the keychain | | `CALX_AUTH_KEY` | |
 | State directory | | `CALX_HOME` | `~/.calx` |

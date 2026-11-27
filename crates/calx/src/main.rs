@@ -97,6 +97,12 @@ struct Cli {
     #[arg(long, env = "CALX_COMPACT_AT", value_name = "TOKENS")]
     compact_at: Option<u64>,
 
+    /// The model's context window in tokens, such as 128k, when the server
+    /// does not report it (OpenAI's API does not). Default: what the server
+    /// reports, else 400k assumed.
+    #[arg(long, env = "CALX_CONTEXT_WINDOW", value_name = "TOKENS", value_parser = settings::parse_window)]
+    context_window: Option<u64>,
+
     /// Start in the panel view instead of plain scrolling output.
     #[arg(long, short = 'p', conflicts_with = "prompt")]
     panels: bool,
@@ -441,6 +447,38 @@ fn client(
     Ok((Client::new(api, &base_url, auth), model, effort, key))
 }
 
+/// The model's context window: from the flag, else saved in Prefs for this
+/// server and model, else what the server reports.
+async fn window(
+    cli: &Cli,
+    saved: &settings::Settings,
+    server_key: &str,
+    client: &Client,
+    model: &str,
+) -> Option<status::Window> {
+    use status::{Window, WindowFrom};
+    if let Some(tokens) = cli.context_window {
+        return Some(Window {
+            tokens,
+            from: WindowFrom::Flag,
+        });
+    }
+    if let Some(&tokens) = saved
+        .servers
+        .get(server_key)
+        .and_then(|s| s.windows.get(model))
+    {
+        return Some(Window {
+            tokens,
+            from: WindowFrom::Prefs,
+        });
+    }
+    client.context_window(model).await.map(|tokens| Window {
+        tokens,
+        from: WindowFrom::Server,
+    })
+}
+
 fn rules(forget: Option<usize>) -> Result<()> {
     let mut rules = Rules::load(&std::env::current_dir()?)?;
     if let Some(n) = forget {
@@ -509,10 +547,13 @@ async fn chat(cli: &Cli) -> Result<()> {
     let saved = settings::Settings::load()?;
     let (client, model, effort, server_key) = client(cli, &saved)?;
     let while_busy = cli.while_busy.or(saved.while_busy).unwrap_or_default();
+    let window = window(cli, &saved, &server_key, &client, &model).await;
+    // Without a size from the user, compaction follows the window.
+    let compact_auto = cli.compact_at.or(saved.compact_at).is_none();
     let compact_at = cli
         .compact_at
         .or(saved.compact_at)
-        .unwrap_or(calx_core::compaction::DEFAULT_COMPACT_AT);
+        .unwrap_or_else(|| calx_core::compaction::default_compact_at(window.map(|w| w.tokens)));
     let env = LocalEnvironment::current()?;
     let cwd = env.working_dir();
     let shell = env.shell_name().to_string();
@@ -563,6 +604,7 @@ async fn chat(cli: &Cli) -> Result<()> {
     let rules = Rules::load(std::path::Path::new(&cwd))?;
     let mut simple =
         marginalia::Marginalia::new(cli.yes, rules, status::Tally::new(&agent), while_busy);
+    simple.tally.window = window;
     if !cli.prompt.is_empty() {
         let before = agent.items.len();
         if simple.turn(&mut agent, &cli.prompt.join(" ")).await? {
@@ -584,6 +626,7 @@ async fn chat(cli: &Cli) -> Result<()> {
         app.set_prompt_keys(cli.prompt_keys.or(saved.prompt_keys).unwrap_or_default());
         app.set_layout(saved.layout.as_deref());
         app.server_key = server_key;
+        app.set_window_source(compact_auto, cli.context_window.is_some());
         app.settings = saved;
         carrels::run(app, &mut agent, &save).await?;
     }

@@ -37,6 +37,9 @@ pub struct Server {
     /// "none" when the server is sent no effort.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
+    /// Context windows set in Prefs, by model.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub windows: BTreeMap<String, u64>,
 }
 
 /// Names one server for the saved model and effort, such as
@@ -65,6 +68,14 @@ impl Settings {
         let path = Self::path()?;
         calx_core::write_private(&path, &serde_json::to_string_pretty(self)?)?;
         Ok(path)
+    }
+}
+
+/// Reads a context window for clap, such as 128k.
+pub fn parse_window(text: &str) -> Result<u64, String> {
+    match parse_tokens(text) {
+        Some(Some(n)) => Ok(n),
+        _ => Err("expected a token count, such as 128k or 32768".into()),
     }
 }
 
@@ -115,12 +126,13 @@ mod tests {
             Server {
                 model: Some("qwen3:8b".into()),
                 effort: None,
+                windows: BTreeMap::from([("qwen3:8b".into(), 32768)]),
             },
         );
         let json = serde_json::to_string(&s).unwrap();
         assert_eq!(
             json,
-            r#"{"while_busy":"queue","prompt_keys":"vim","compact_at":0,"servers":{"chat http://localhost:11434/v1":{"model":"qwen3:8b"}}}"#
+            r#"{"while_busy":"queue","prompt_keys":"vim","compact_at":0,"servers":{"chat http://localhost:11434/v1":{"model":"qwen3:8b","windows":{"qwen3:8b":32768}}}}"#
         );
         assert_eq!(serde_json::from_str::<Settings>(&json).unwrap(), s);
         assert_eq!(

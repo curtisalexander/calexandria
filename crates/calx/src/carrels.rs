@@ -28,7 +28,7 @@ use crate::marginalia::one_line;
 use crate::notes::Notes;
 use crate::palette::{AMBER, BRICK, CLAY, LAPIS, PLUM, SAGE, SLATE, STONE, VERDIGRIS};
 use crate::settings::{self, Settings};
-use crate::status::{self, Busy, Tally};
+use crate::status::{self, Busy, Tally, Window, WindowFrom};
 
 /// The narrowest terminal that shows the tiles; narrower ones get the Reading room.
 pub const WIDE: u16 = 140;
@@ -178,7 +178,7 @@ enum Entry {
 }
 
 /// The settings Prefs can change, in order.
-const PREFS: [&str; 7] = [
+const PREFS: [&str; 8] = [
     "model",
     "effort",
     "compact at",
@@ -186,6 +186,7 @@ const PREFS: [&str; 7] = [
     "while busy, Enter",
     "prompt keys",
     "layout",
+    "context window",
 ];
 
 const EFFORTS: [&str; 5] = ["none", "low", "medium", "high", "xhigh"];
@@ -246,6 +247,13 @@ pub struct App {
     pub settings: Settings,
     /// Names this server among the saved defaults.
     pub server_key: String,
+    /// Whether the compaction size follows the context window, because the
+    /// user has not set one.
+    compact_auto: bool,
+    /// Whether --context-window set the window, for every model.
+    window_flag: bool,
+    /// The model the window was found for.
+    window_model: String,
     entries: Vec<Entry>,
     tools: Vec<ToolRow>,
     mix: Mix,
@@ -297,6 +305,9 @@ impl App {
             prefs: None,
             settings: Settings::default(),
             server_key: String::new(),
+            compact_auto: false,
+            window_flag: false,
+            window_model: agent.model.clone(),
             entries: Vec::new(),
             tools: Vec::new(),
             mix: Mix::default(),
@@ -876,7 +887,7 @@ impl App {
         let left = vec![
             dim(format!("§{} · ctx ", self.items + 1)),
             Span::styled(status::tokens(ctx), Style::new().fg(LAPIS)),
-            dim(format!(" {}%{cache}", ctx * 100 / status::CONTEXT_WINDOW)),
+            dim(format!(" {}%{cache}", ctx * 100 / t.window())),
         ];
         let open = status::legs(t.exposure)
             .iter()
@@ -1348,10 +1359,7 @@ impl App {
             } else {
                 "–".into()
             }),
-            dim(format!(
-                " of {} (assumed) · last request",
-                status::tokens(status::CONTEXT_WINDOW)
-            )),
+            dim(format!(" of {} · last request", self.tally.window_label())),
         ])];
         // One pigment per part, so the bars read as a key to the total.
         let colors = [STONE, PLUM, AMBER, VERDIGRIS, SLATE];
@@ -1467,6 +1475,7 @@ impl App {
                 Keys::Vim => "vim".into(),
             },
             LAYOUTS[self.layout].0.to_string(),
+            self.tally.window_label(),
         ];
         let mut lines = Vec::new();
         for (n, (label, value)) in PREFS.iter().zip(values).enumerate() {
@@ -1528,7 +1537,6 @@ impl App {
             row("backend", i.backend.clone()),
             row("shell", i.shell.clone()),
             row("always this session", if always.is_empty() { "–".into() } else { always.join(", ") }),
-            row("context window", format!("{} (assumed)", status::tokens(status::CONTEXT_WINDOW))),
             Line::default(),
             dim("A shell rule allows commands starting with its words, never ones with shell syntax; an edit or write rule allows files in the project outside .git. `calx rules` lists every project's.").into(),
             dim("Saved defaults are in settings.json in the calx home; the model and effort are saved for this server only, and approvals never. A flag or CALX_ variable overrides a saved default. The backend comes from --api, --base-url, --key, and --gateway; the shell from CALX_SHELL.").into(),
@@ -1605,6 +1613,13 @@ impl App {
                 let next = step(&EFFORTS, now, by);
                 self.info.effort = (next != "none").then(|| next.to_string());
             }
+            7 => {
+                let now = self
+                    .tally
+                    .window
+                    .map_or(String::new(), |w| format!("{}k", w.tokens / 1000));
+                self.start_typing(now);
+            }
             2 => {
                 let now = self
                     .info
@@ -1643,8 +1658,27 @@ impl App {
         }
         match row {
             0 if !text.is_empty() => self.info.model = text.to_string(),
+            7 => match settings::parse_tokens(text) {
+                Some(window) => {
+                    self.tally.window = window.map(|tokens| Window {
+                        tokens,
+                        from: WindowFrom::Prefs,
+                    });
+                    self.window_model = self.info.model.clone();
+                    self.follow_window();
+                }
+                None => self.note(
+                    format!(
+                        "{text:?} is not a token count; try 128k, 32768, or never to forget it"
+                    ),
+                    true,
+                ),
+            },
             2 => match settings::parse_tokens(text) {
-                Some(at) => self.info.compact_at = at,
+                Some(at) => {
+                    self.info.compact_at = at;
+                    self.compact_auto = false;
+                }
                 None => self.note(
                     format!("{text:?} is not a token count; try 200k, 150000, or never"),
                     true,
@@ -1710,15 +1744,21 @@ impl App {
         let s = &mut self.settings;
         s.while_busy = Some(self.busy);
         s.prompt_keys = Some(self.prompt_keys);
-        s.compact_at = Some(i.compact_at.unwrap_or(0));
+        // A size that only follows the window is not saved, so it keeps following.
+        s.compact_at = (!self.compact_auto).then(|| i.compact_at.unwrap_or(0));
         s.layout = Some(LAYOUTS[self.layout].0.to_string());
-        s.servers.insert(
-            self.server_key.clone(),
-            settings::Server {
-                model: Some(i.model.clone()),
-                effort: Some(i.effort.clone().unwrap_or("none".into())),
-            },
-        );
+        let server = s.servers.entry(self.server_key.clone()).or_default();
+        server.model = Some(i.model.clone());
+        server.effort = Some(i.effort.clone().unwrap_or("none".into()));
+        match self.tally.window {
+            Some(w) if w.from == WindowFrom::Prefs => {
+                server.windows.insert(i.model.clone(), w.tokens);
+            }
+            None => {
+                server.windows.remove(&i.model);
+            }
+            Some(_) => {}
+        }
         match s.save() {
             Ok(path) => self.note(
                 format!(
@@ -1729,6 +1769,20 @@ impl App {
                 false,
             ),
             Err(e) => self.note(format!("could not save settings: {e:#}"), true),
+        }
+    }
+
+    /// Says whether compaction follows the window, and whether a flag set it.
+    pub fn set_window_source(&mut self, compact_auto: bool, flag: bool) {
+        self.compact_auto = compact_auto;
+        self.window_flag = flag;
+    }
+
+    /// Moves the compaction size with the window, unless the user set one.
+    fn follow_window(&mut self) {
+        if self.compact_auto {
+            let window = self.tally.window.map(|w| w.tokens);
+            self.info.compact_at = Some(calx_core::compaction::default_compact_at(window));
         }
     }
 
@@ -1814,6 +1868,7 @@ async fn main_loop(
             "/exit" | "/quit" => return Ok(()),
             "/compact" => {
                 let before = agent.items.len();
+                refresh_window(app, agent).await;
                 {
                     let mut a = app.borrow_mut();
                     a.apply(agent);
@@ -1861,6 +1916,42 @@ async fn main_loop(
     }
 }
 
+/// Finds the window of a model chosen in Prefs: saved for it, else from the
+/// server. A window from --context-window stays for every model.
+async fn refresh_window(app: &RefCell<App>, agent: &Agent) {
+    let (model, saved) = {
+        let a = app.borrow();
+        if a.window_flag || a.info.model == a.window_model {
+            return;
+        }
+        let saved = a
+            .settings
+            .servers
+            .get(&a.server_key)
+            .and_then(|s| s.windows.get(&a.info.model))
+            .copied();
+        (a.info.model.clone(), saved)
+    };
+    let window = match saved {
+        Some(tokens) => Some(Window {
+            tokens,
+            from: WindowFrom::Prefs,
+        }),
+        None => agent
+            .client
+            .context_window(&model)
+            .await
+            .map(|tokens| Window {
+                tokens,
+                from: WindowFrom::Server,
+            }),
+    };
+    let mut a = app.borrow_mut();
+    a.window_model = model;
+    a.tally.window = window;
+    a.follow_window();
+}
+
 /// Runs one prompt while drawing and answering keys, and returns whether it
 /// finished. Only terminal errors return `Err`; a failed turn is shown in the
 /// conversation.
@@ -1873,6 +1964,7 @@ async fn turn(
     save: &dyn Fn(&Agent, usize),
 ) -> Result<bool> {
     let before = agent.items.len();
+    refresh_window(app, agent).await;
     {
         let mut a = app.borrow_mut();
         a.apply(agent);

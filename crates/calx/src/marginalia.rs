@@ -465,7 +465,7 @@ impl Marginalia {
     fn status_line(&self, width: usize) -> String {
         let t = &self.tally;
         let ctx = t.last.input_tokens;
-        let share = ctx * 100 / status::CONTEXT_WINDOW;
+        let share = ctx * 100 / t.window();
         let filled = (share as usize).div_ceil(12).min(8);
         let cache = t
             .cache_percent()

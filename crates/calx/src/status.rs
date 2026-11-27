@@ -6,9 +6,25 @@ use std::collections::HashMap;
 use calx_core::agent::{Agent, DECLINED, SKIPPED};
 use calx_core::message::{Event, Exposure, Item, Usage};
 
-/// The context window the views measure use against. Responses does not
-/// report a model's window, so this is an assumption to revisit per model.
-pub const CONTEXT_WINDOW: u64 = 400_000;
+/// The context window the views measure against when neither the user nor
+/// the server says what it is.
+pub const ASSUMED_WINDOW: u64 = 400_000;
+
+/// The model's context window, and where calx learned it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Window {
+    pub tokens: u64,
+    pub from: WindowFrom,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowFrom {
+    /// --context-window or CALX_CONTEXT_WINDOW.
+    Flag,
+    /// Set in Prefs, and maybe saved for this server and model.
+    Prefs,
+    Server,
+}
 
 #[derive(Default)]
 pub struct Tally {
@@ -23,6 +39,8 @@ pub struct Tally {
     pub history: Vec<u64>,
     /// The legs opened by tool calls that ran, in this session so far.
     pub exposure: Exposure,
+    /// The model's context window, when known.
+    pub window: Option<Window>,
     started: HashMap<usize, Exposure>,
 }
 
@@ -95,6 +113,22 @@ impl Tally {
             }
             _ => {}
         }
+    }
+
+    /// The context window to measure against.
+    pub fn window(&self) -> u64 {
+        self.window.map_or(ASSUMED_WINDOW, |w| w.tokens)
+    }
+
+    /// The window for the user, such as "128k (from the server)".
+    pub fn window_label(&self) -> String {
+        let from = match self.window.map(|w| w.from) {
+            Some(WindowFrom::Flag) => "--context-window",
+            Some(WindowFrom::Prefs) => "set in Prefs",
+            Some(WindowFrom::Server) => "from the server",
+            None => "assumed",
+        };
+        format!("{} ({from})", tokens(self.window()))
     }
 
     /// The share of the latest request's input the server had cached.

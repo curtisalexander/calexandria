@@ -63,6 +63,40 @@ impl Client {
         }
     }
 
+    /// The model's context window in tokens, when the server says. Servers
+    /// report it in different places: an entry of `/models` (OpenRouter's
+    /// `context_length`, vLLM's `max_model_len`, LM Studio's
+    /// `max_context_length`, llama.cpp's `meta.n_ctx_train`), or Ollama's
+    /// `/api/show`. OpenAI's API does not, so this is `None` there. It gives
+    /// up after a few seconds, and on any error.
+    pub async fn context_window(&self, model: &str) -> Option<u64> {
+        let http = match self {
+            Client::Responses(c) => &c.http,
+            Client::Chat(c) => &c.http,
+        };
+        let lookup = async {
+            if let Ok(list) = http.get_json(&format!("{}/models", http.base_url)).await
+                && let Some(n) = window_in_list(&list, model)
+            {
+                return Some(n);
+            }
+            // Ollama serves its own API next to the OpenAI-style one at /v1.
+            let root = http.base_url.strip_suffix("/v1")?;
+            let show = http
+                .post_json(
+                    &format!("{root}/api/show"),
+                    &serde_json::json!({ "model": model }),
+                )
+                .await
+                .ok()?;
+            ollama_window(&show)
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(4), lookup)
+            .await
+            .ok()
+            .flatten()
+    }
+
     /// For the user: "responses · https://api.openai.com/v1 · ChatGPT".
     pub fn describe(&self) -> String {
         let (api, http) = match self {
@@ -91,6 +125,25 @@ impl Http {
             base_url: base_url.trim_end_matches('/').to_string(),
             auth,
         }
+    }
+
+    /// GETs `url` as JSON, with the server's auth.
+    async fn get_json(&self, url: &str) -> Result<Value> {
+        self.json(self.client.get(url)).await
+    }
+
+    /// POSTs `body` to `url` for JSON, with the server's auth.
+    async fn post_json(&self, url: &str, body: &Value) -> Result<Value> {
+        self.json(self.client.post(url).json(body)).await
+    }
+
+    async fn json(&self, mut request: reqwest::RequestBuilder) -> Result<Value> {
+        if let Some(token) = self.auth.token().await? {
+            request = request.bearer_auth(token);
+        }
+        let response = request.header("accept", "application/json").send().await?;
+        anyhow::ensure!(response.status().is_success(), "{}", response.status());
+        Ok(response.json().await?)
     }
 
     /// POSTs `body` to `path` for a stream of server-sent events. A 401 gets
@@ -141,5 +194,104 @@ impl Http {
             bail!("{message}\nCheck your ChatGPT plan usage at https://chatgpt.com/settings/usage");
         }
         bail!("{} returned {status}: {message}", self.base_url)
+    }
+}
+
+/// Fields servers use for a model's context window, most specific first.
+const WINDOW_FIELDS: [&str; 8] = [
+    "context_window",
+    "context_length",
+    "max_model_len",
+    "max_context_length",
+    "n_ctx",
+    "n_ctx_train",
+    "max_input_tokens",
+    "input_token_limit",
+];
+
+/// The context window of `model` in a `/models` reply, read from its entry
+/// or one level inside it, such as llama.cpp's `meta` or OpenRouter's
+/// `top_provider`.
+fn window_in_list(list: &Value, model: &str) -> Option<u64> {
+    let entries = list["data"].as_array().or(list["models"].as_array())?;
+    let entry = entries.iter().find(|e| {
+        ["id", "slug", "name", "model"]
+            .iter()
+            .any(|k| e[*k].as_str() == Some(model))
+    })?;
+    let read = |v: &Value| {
+        WINDOW_FIELDS
+            .iter()
+            .find_map(|f| v[*f].as_u64())
+            .filter(|n| *n > 0)
+    };
+    read(entry).or_else(|| entry.as_object()?.values().find_map(read))
+}
+
+/// The window Ollama runs a model with: its `num_ctx` parameter when it has
+/// one, else the model's own `<architecture>.context_length`.
+fn ollama_window(show: &Value) -> Option<u64> {
+    let num_ctx = show["parameters"].as_str().and_then(|p| {
+        p.lines().find_map(|l| {
+            let mut words = l.split_whitespace();
+            (words.next()? == "num_ctx").then(|| words.next()?.parse().ok())?
+        })
+    });
+    num_ctx.or_else(|| {
+        show["model_info"]
+            .as_object()?
+            .iter()
+            .find(|(k, _)| k.ends_with(".context_length"))?
+            .1
+            .as_u64()
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn finds_the_window_each_kind_of_server_reports() {
+        let cases = [
+            // OpenRouter
+            (
+                json!({"data": [{"id": "a/b", "context_length": 1}, {"id": "m", "context_length": 131072, "top_provider": {"context_length": 64000}}]}),
+                Some(131072),
+            ),
+            // vLLM
+            (
+                json!({"data": [{"id": "m", "max_model_len": 32768}]}),
+                Some(32768),
+            ),
+            // LM Studio
+            (
+                json!({"data": [{"id": "m", "max_context_length": 8192}]}),
+                Some(8192),
+            ),
+            // llama.cpp
+            (
+                json!({"data": [{"id": "m", "meta": {"n_ctx_train": 40960}}]}),
+                Some(40960),
+            ),
+            // OpenAI: no window, and other models' windows do not count
+            (
+                json!({"data": [{"id": "m", "owned_by": "openai"}, {"id": "x", "context_window": 9}]}),
+                None,
+            ),
+            (
+                json!({"models": [{"slug": "m", "context_window": 272000}]}),
+                Some(272000),
+            ),
+        ];
+        for (list, want) in cases {
+            assert_eq!(window_in_list(&list, "m"), want, "{list}");
+        }
+
+        let show = json!({"parameters": "stop \"<|im_end|>\"\nnum_ctx 16384", "model_info": {"qwen3.context_length": 40960}});
+        assert_eq!(ollama_window(&show), Some(16384));
+        let show = json!({"parameters": "stop x", "model_info": {"general.architecture": "qwen3", "qwen3.context_length": 40960}});
+        assert_eq!(ollama_window(&show), Some(40960));
     }
 }

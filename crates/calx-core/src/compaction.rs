@@ -26,6 +26,13 @@ use crate::tools::{Tool, ToolSpec};
 
 /// The default size, in tokens, at which a turn compacts the conversation.
 pub const DEFAULT_COMPACT_AT: u64 = 200_000;
+/// Where to compact when the user has not said: at 200k tokens, or at three
+/// quarters of a smaller context window, so a small local model compacts
+/// before it overflows.
+pub fn default_compact_at(window: Option<u64>) -> u64 {
+    window.map_or(DEFAULT_COMPACT_AT, |w| DEFAULT_COMPACT_AT.min(w * 3 / 4))
+}
+
 /// How many plans the model may propose before calx gives up for this turn.
 pub const MAX_ATTEMPTS: u32 = 3;
 /// The latest visible items, which a plan must leave as they are.

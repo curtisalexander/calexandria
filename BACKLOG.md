@@ -9,7 +9,6 @@ everything here, or in this order; the README roadmap is the near-term plan.
   ([post](https://blog.exe.dev/compaction)): built (`compaction.rs`). Next:
   - backtest the linter's limits (keep 15–70%, the latest 4 items, under half
     per rewrite) on real saved sessions, and tune them;
-  - look up each model's real context window instead of assuming 400k;
 - **History lives in SQLite** (`sessions.db`): an append-only `items` table
   with stable per-session sequence numbers, which compaction records can point at.
   Next: full-text search over sessions (SQLite FTS5) and memory in the same database.
