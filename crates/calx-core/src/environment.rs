@@ -11,10 +11,11 @@
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 
 pub trait Environment: Send + Sync {
     /// The operating system, such as "macos", "windows", or "linux".
@@ -31,7 +32,45 @@ pub trait Environment: Send + Sync {
     fn write_file(&self, path: &str, contents: &str) -> Result<()>;
     /// Runs a shell command with stdin closed, stopping it after `timeout`.
     fn exec(&self, command: &str, timeout: Duration) -> Result<ExecOutput>;
+    /// Files under `path` (a directory or one file), sorted, at most `max`.
+    /// Skips hidden files and what `.gitignore` and `.ignore` files exclude;
+    /// `glob`, such as `*.rs`, keeps only matching files.
+    fn find(&self, path: &str, glob: Option<&str>, max: usize) -> Result<Found<String>>;
+    /// Lines matching a regular expression in the files `find` would list,
+    /// skipping binary files, sorted by path and line, at most `max`.
+    fn grep(&self, query: &GrepQuery, max: usize) -> Result<Found<GrepMatch>>;
 }
+
+/// Results up to a limit, and whether there were more.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Found<T> {
+    pub items: Vec<T>,
+    /// The search stopped at the limit. Which results come first is then
+    /// not fixed, since the search runs on several threads.
+    pub more: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct GrepQuery {
+    pub pattern: String,
+    pub path: String,
+    pub glob: Option<String>,
+    pub ignore_case: bool,
+    /// Match the pattern as plain text, not a regular expression.
+    pub literal: bool,
+}
+
+/// Ordered by path, then line.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct GrepMatch {
+    pub path: String,
+    pub line: u64,
+    pub text: String,
+}
+
+/// Longest matching line `grep` returns, in characters; minified files
+/// otherwise fill the output with one line.
+const MAX_LINE_CHARS: usize = 300;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecOutput {
@@ -72,6 +111,86 @@ impl LocalEnvironment {
         // `join` keeps an absolute path as it is.
         self.cwd.join(path)
     }
+
+    /// A path as the model should see it: relative to the working directory
+    /// when it is inside it, with `/` separators.
+    fn shown(&self, path: &Path) -> String {
+        let shown = path.strip_prefix(&self.cwd).unwrap_or(path);
+        shown.to_string_lossy().replace('\\', "/")
+    }
+
+    /// Walks the files under `path` on several threads, as ripgrep and fd do,
+    /// calling `visit` on each with a value `init` makes for each thread.
+    /// `visit` returns false to stop the whole walk.
+    fn walk<S: Send>(
+        &self,
+        path: &str,
+        glob: Option<&str>,
+        init: impl Fn() -> S + Sync,
+        visit: impl Fn(&mut S, &Path) -> bool + Sync,
+    ) -> Result<()> {
+        let root = self.resolve(path);
+        if !root.exists() {
+            bail!("{path} does not exist");
+        }
+        let mut builder = ignore::WalkBuilder::new(&root);
+        // Honor .gitignore outside git repositories too.
+        builder.require_git(false);
+        // Matched here rather than as ignore overrides, which would let a
+        // glob bring back ignored and hidden files. A glob without a `/`
+        // matches file names, as in .gitignore; one with a `/`, the path.
+        let glob = glob
+            .map(|g| {
+                let matcher = globset::Glob::new(g)
+                    .with_context(|| format!("invalid glob {g}"))?
+                    .compile_matcher();
+                anyhow::Ok((matcher, g.contains('/')))
+            })
+            .transpose()?;
+        let stop = AtomicBool::new(false);
+        builder.build_parallel().run(|| {
+            let mut state = init();
+            let (stop, visit, glob, root) = (&stop, &visit, &glob, &root);
+            Box::new(move |entry| {
+                use ignore::WalkState;
+                if stop.load(Ordering::Relaxed) {
+                    return WalkState::Quit;
+                }
+                let Ok(entry) = entry else {
+                    return WalkState::Continue;
+                };
+                if !entry.file_type().is_some_and(|t| t.is_file()) {
+                    return WalkState::Continue;
+                }
+                if let Some((matcher, whole_path)) = glob {
+                    let matched = if *whole_path {
+                        matcher.is_match(entry.path().strip_prefix(root).unwrap_or(entry.path()))
+                    } else {
+                        matcher.is_match(entry.file_name())
+                    };
+                    if !matched {
+                        return WalkState::Continue;
+                    }
+                }
+                if visit(&mut state, entry.path()) {
+                    WalkState::Continue
+                } else {
+                    stop.store(true, Ordering::Relaxed);
+                    WalkState::Quit
+                }
+            })
+        });
+        Ok(())
+    }
+}
+
+/// Sorts what a walk collected and cuts it to `max`.
+fn finish<T: Ord>(items: Mutex<Vec<T>>, max: usize) -> Found<T> {
+    let mut items = items.into_inner().unwrap_or_else(|e| e.into_inner());
+    items.sort();
+    let more = items.len() > max;
+    items.truncate(max);
+    Found { items, more }
 }
 
 impl Environment for LocalEnvironment {
@@ -125,6 +244,63 @@ impl Environment for LocalEnvironment {
             cmd.env_remove(var);
         }
         run(cmd, self.shell.name(), timeout)
+    }
+
+    fn find(&self, path: &str, glob: Option<&str>, max: usize) -> Result<Found<String>> {
+        let found = Mutex::new(Vec::new());
+        self.walk(
+            path,
+            glob,
+            || (),
+            |_, file| {
+                let mut found = found.lock().unwrap_or_else(|e| e.into_inner());
+                found.push(self.shown(file));
+                found.len() <= max
+            },
+        )?;
+        Ok(finish(found, max))
+    }
+
+    fn grep(&self, query: &GrepQuery, max: usize) -> Result<Found<GrepMatch>> {
+        use grep_searcher::{BinaryDetection, SearcherBuilder, sinks::Lossy};
+        let matcher = grep_regex::RegexMatcherBuilder::new()
+            .case_insensitive(query.ignore_case)
+            .fixed_strings(query.literal)
+            .build(&query.pattern)
+            .with_context(|| format!("invalid pattern {}", query.pattern))?;
+        let found = Mutex::new(Vec::new());
+        let searcher = || {
+            SearcherBuilder::new()
+                .binary_detection(BinaryDetection::quit(0))
+                .line_number(true)
+                .build()
+        };
+        self.walk(
+            &query.path,
+            query.glob.as_deref(),
+            searcher,
+            |searcher, file| {
+                let path = self.shown(file);
+                let mut keep_going = true;
+                // A file that cannot be read is skipped, as ripgrep does.
+                let _ = searcher.search_path(
+                    &matcher,
+                    file,
+                    Lossy(|line, text| {
+                        let mut found = found.lock().unwrap_or_else(|e| e.into_inner());
+                        found.push(GrepMatch {
+                            path: path.clone(),
+                            line,
+                            text: text.trim_end().chars().take(MAX_LINE_CHARS).collect(),
+                        });
+                        keep_going = found.len() <= max;
+                        Ok(keep_going)
+                    }),
+                );
+                keep_going
+            },
+        )?;
+        Ok(finish(found, max))
     }
 }
 
@@ -296,6 +472,73 @@ mod tests {
             .exec("cat sub/note.txt", Duration::from_secs(30))
             .unwrap();
         assert_eq!((out.output.trim(), out.exit), ("hi", Exit::Code(0)));
+    }
+
+    #[test]
+    fn find_and_grep_skip_ignored_hidden_and_binary_files() {
+        let (dir, env) = temp_env("search");
+        for (path, text) in [
+            (".gitignore", "skip/\n"),
+            ("a.rs", "let needle = 1;\nno\nneedle again\n"),
+            ("skip/b.rs", "needle\n"),
+            (".hidden.rs", "needle\n"),
+            ("sub/c.txt", "A Needle\n"),
+            ("sub/d.rs", "needles\n"),
+        ] {
+            env.write_file(path, text).unwrap();
+        }
+        std::fs::write(dir.join("blob.bin"), b"needle\0\x01").unwrap();
+
+        let files = env.find(".", Some("*.rs"), 10).unwrap();
+        assert_eq!(files.items, vec!["a.rs", "sub/d.rs"]);
+        assert!(!files.more);
+        let files = env.find(".", Some("sub/*"), 10).unwrap();
+        assert_eq!(files.items, vec!["sub/c.txt", "sub/d.rs"]);
+
+        let lines = |q: GrepQuery| -> Vec<String> {
+            let found = env.grep(&q, 10).unwrap();
+            found
+                .items
+                .iter()
+                .map(|m| format!("{}:{}:{}", m.path, m.line, m.text))
+                .collect()
+        };
+        let query = GrepQuery {
+            pattern: "needle\\b".into(),
+            path: ".".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            lines(query.clone()),
+            vec!["a.rs:1:let needle = 1;", "a.rs:3:needle again"]
+        );
+        assert_eq!(
+            lines(GrepQuery {
+                ignore_case: true,
+                path: "sub".into(),
+                ..query.clone()
+            }),
+            vec!["sub/c.txt:1:A Needle"]
+        );
+        // As plain text, \b is two characters that appear nowhere.
+        assert!(
+            lines(GrepQuery {
+                literal: true,
+                ..query.clone()
+            })
+            .is_empty()
+        );
+
+        let capped = env
+            .grep(
+                &GrepQuery {
+                    pattern: "needle".into(),
+                    ..query
+                },
+                1,
+            )
+            .unwrap();
+        assert_eq!((capped.items.len(), capped.more), (1, true));
     }
 
     #[test]

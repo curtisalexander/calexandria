@@ -14,9 +14,12 @@ Early. Today calx can:
   allowance instead of API credits. Tokens refresh on their own.
 - **Work as an agent** over OpenAI's Responses API: it streams the reply and a
   summary of the model's reasoning, and calls tools until the task is done.
-- **Tools:** `read` (files and directories), `write`, `edit` (exact text
+- **Tools:** `read` (files and directories), `grep` and `find` (built on
+  ripgrep's own crates, so they are as fast as `rg` and `fd`, skip hidden and
+  `.gitignore`d files, and need nothing installed), `write`, `edit` (exact text
   replacement), and `shell` (bash, which is Git Bash on Windows, otherwise
-  PowerShell). calx asks before each `write`, `edit`, and `shell`, showing a
+  PowerShell). `read`, `grep`, and `find` only read, so they run
+  without asking; calx asks before each `write`, `edit`, and `shell`, showing a
   diff for edits; `-y` skips that.
 - **Two views.** *Marginalia*, the default, is plain scrolling output: each item
   is numbered in the left margin (`§16`), tool times are in the right margin,
@@ -114,7 +117,7 @@ the Keychain to ask once after each update whether calx may use its key.
 
 ## Roadmap
 
-1. More tools (search, find files) and saved approval rules.
+1. Saved approval rules, per project.
 2. More model backends: Chat Completions (local MLX, Ollama, work gateways),
    API keys, and a configurable OAuth flow for work.
 3. Terminal UI next steps: a Trace view of every request in a turn, and

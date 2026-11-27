@@ -5,6 +5,7 @@
 //! touch the OS directly; they act through an [`Environment`].
 
 mod files;
+mod search;
 mod shell;
 
 use std::sync::Arc;
@@ -49,11 +50,13 @@ pub struct Toolbox {
 }
 
 impl Toolbox {
-    /// The built-in tools: read, write, edit, and shell, all acting in `env`.
+    /// The built-in tools: read, grep, find, write, edit, and shell, all acting in `env`.
     pub fn builtin(env: Arc<dyn Environment>) -> Self {
         Self {
             tools: vec![
                 Arc::new(files::Read { env: env.clone() }),
+                Arc::new(search::Grep { env: env.clone() }),
+                Arc::new(search::Find { env: env.clone() }),
                 Arc::new(files::Write { env: env.clone() }),
                 Arc::new(files::Edit { env: env.clone() }),
                 Arc::new(shell::ShellTool { env }),
