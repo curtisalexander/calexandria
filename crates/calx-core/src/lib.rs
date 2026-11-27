@@ -3,6 +3,7 @@
 //! command-line program depend on this crate and stay thin.
 
 pub mod agent;
+pub mod approvals;
 pub mod auth;
 pub mod environment;
 pub mod message;

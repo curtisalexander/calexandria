@@ -19,6 +19,9 @@ never pip. It must run on Windows, macOS, and Linux.
   view, `carrels.rs` the full-screen ratatui view, and `status.rs` what both
   report. Views learn what the agent does only from `Event`s and `Approval`s;
   when a view needs more, add an event in the core rather than reaching into it.
+- `crates/calx-core/src/approvals.rs`: saved per-project approval rules, kept in
+  the calx home, never in a project. Keep them narrow; a rule that matches a
+  command must reject shell syntax.
 - `crates/calx-core/src/store.rs`: secrets, encrypted with a key in the OS keychain.
 - `crates/calx-core/src/session.rs`: sessions in SQLite (`sessions.db`), an
   append-only list of items per session numbered from 1. Never rewrite saved

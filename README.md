@@ -48,6 +48,7 @@ calx                             # start a conversation; /exit to quit
 calx -m gpt-6.2-astra --effort high
 calx -y "run the tests and fix what fails"   # no approval prompts
 calx sessions                    # list recent sessions
+calx rules                       # list saved approval rules
 calx -p                          # the panel view; -c -p resumes into it
 calx -c                          # continue the latest session in this directory
 calx -r 4f02f1ac "and then?"     # resume a session by the start of its ID
@@ -81,7 +82,18 @@ Esc stops it only from normal mode with an empty prompt.
 
 In the plain view, a paste of several lines is one prompt, and a line that ends
 with `\` continues on the next, as in a shell. When calx asks to run a tool, answer `y` yes, `n` no, `a`
-always for that tool this session, or `?` for why it asks.
+always for that tool this session, `p` always in this project, or `?` for why
+it asks.
+
+`p` saves a rule to `~/.calx/approvals.json`, never in the project, so a
+repository you clone cannot approve its own commands. A project is the git
+repository calx runs in, or else its directory. Rules are narrow: a shell rule
+is a command prefix such as `cargo test`, and never matches a command with
+shell syntax in it (`;`, `&&`, `|`, `$(`, redirects), and calx offers none for
+such a command; an `edit` or `write` rule allows paths inside the project after
+following symlinks, but not inside `.git`. A rule for a program such as
+`python3` trusts it with any arguments, so save those with care. `calx rules`
+lists the rules and `calx rules --forget <N>` removes one.
 
 Every conversation is saved to `~/.calx/sessions.db` (SQLite) after each turn,
 including what the tools read, so treat it as private as your files.
@@ -117,7 +129,7 @@ the Keychain to ask once after each update whether calx may use its key.
 
 ## Roadmap
 
-1. Saved approval rules, per project.
+1. Editing approval rules from the panel view.
 2. More model backends: Chat Completions (local MLX, Ollama, work gateways),
    API keys, and a configurable OAuth flow for work.
 3. Terminal UI next steps: a Trace view of every request in a turn, and

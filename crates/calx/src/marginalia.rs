@@ -8,6 +8,7 @@ use std::io::{BufRead, IsTerminal, Write};
 
 use anyhow::Result;
 use calx_core::agent::{Agent, Approval, DECLINED, SKIPPED};
+use calx_core::approvals::{Rule, Rules};
 use calx_core::message::Event;
 
 use tokio::sync::{Notify, mpsc};
@@ -39,6 +40,8 @@ pub struct Marginalia {
     pub yes: bool,
     /// Tools the user answered "always" for, this session.
     pub always: HashSet<String>,
+    /// Approvals saved for this project.
+    pub rules: Rules,
     pub tally: Tally,
     /// What a line typed while a turn runs does.
     busy: Busy,
@@ -72,10 +75,11 @@ enum Line {
 }
 
 impl Marginalia {
-    pub fn new(yes: bool, tally: Tally, busy: Busy) -> Self {
+    pub fn new(yes: bool, rules: Rules, tally: Tally, busy: Busy) -> Self {
         Self {
             yes,
             always: HashSet::new(),
+            rules,
             tally,
             busy,
             lines: None,
@@ -160,6 +164,8 @@ impl Marginalia {
         let line = RefCell::new(Line::Fresh);
         let tally = RefCell::new(std::mem::take(&mut self.tally));
         let (yes, always) = (self.yes, RefCell::new(std::mem::take(&mut self.always)));
+        let rules = &mut self.rules;
+        let rules = RefCell::new(rules);
         let typed = RefCell::new(std::mem::take(&mut self.typed));
         let steering = RefCell::new(Vec::<String>::new());
         // Whether an approval waits for a line, and whether stdin has ended.
@@ -250,9 +256,15 @@ impl Marginalia {
             let _ = out.flush();
         };
         let mut approve = async |ask: Approval| -> bool {
-            if yes || always.borrow().contains(&ask.name) {
+            if yes || always.borrow().contains(&ask.name) || rules.borrow().allowing(&ask).is_some()
+            {
                 return true;
             }
+            let rule = Rule::suggest(rules.borrow().project(), &ask);
+            let for_project = rule
+                .as_ref()
+                .map(|r| format!("{BOLD}p{RESET} always {} in this project  ", r.label()))
+                .unwrap_or_default();
             let mut out = std::io::stdout();
             if let Line::Tool { width: used } = *line.borrow() {
                 let _ = writeln!(out, "{}", right(used, "waiting for you", width, YELLOW));
@@ -278,7 +290,7 @@ impl Marginalia {
                 let _ = write!(
                     out,
                     "\n{BODY}{BOLD}{question}{RESET}  {BOLD}y{RESET} yes  {BOLD}n{RESET} no  \
-                     {BOLD}a{RESET} always this session  {BOLD}?{RESET} why  "
+                     {BOLD}a{RESET} always this session  {for_project}{BOLD}?{RESET} why  "
                 );
                 let _ = out.flush();
                 asking.set(true);
@@ -296,6 +308,25 @@ impl Marginalia {
                     "y" | "yes" => return true,
                     "a" | "always" => {
                         always.borrow_mut().insert(ask.name.clone());
+                        return true;
+                    }
+                    "p" if rule.is_some() => {
+                        let rule = rule.clone().expect("checked above");
+                        let label = rule.label();
+                        match rules.borrow_mut().add(rule) {
+                            Ok(()) => {
+                                let _ = writeln!(
+                                    out,
+                                    "{BODY}{DIM}saved: always {label} in this project{RESET}"
+                                );
+                            }
+                            Err(e) => {
+                                let _ = writeln!(
+                                    out,
+                                    "{BODY}{RED}could not save the rule: {e:#}{RESET}"
+                                );
+                            }
+                        }
                         return true;
                     }
                     "?" | "why" => {

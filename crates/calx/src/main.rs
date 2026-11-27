@@ -8,6 +8,7 @@ use std::io::BufRead;
 
 use anyhow::{Context, Result};
 use calx_core::agent::Agent;
+use calx_core::approvals::Rules;
 use calx_core::auth::{ChatGptAuth, CredentialStore, PendingLogin};
 use calx_core::environment::{Environment, LocalEnvironment};
 use calx_core::responses::ResponsesClient;
@@ -72,6 +73,12 @@ enum Command {
     Logout,
     /// List recent sessions.
     Sessions,
+    /// List the approvals saved with `p` at an approval prompt.
+    Rules {
+        /// Remove rule N, as numbered in the list.
+        #[arg(long, value_name = "N")]
+        forget: Option<usize>,
+    },
 }
 
 #[tokio::main]
@@ -81,6 +88,7 @@ async fn main() -> Result<()> {
         Some(Command::Login) => login().await,
         Some(Command::Logout) => logout(),
         Some(Command::Sessions) => list_sessions(),
+        Some(Command::Rules { forget }) => rules(forget),
         None => chat(&cli).await,
     }
 }
@@ -143,6 +151,33 @@ fn system_prompt(env: &dyn Environment) -> String {
         env.os(),
         env.working_dir()
     )
+}
+
+fn rules(forget: Option<usize>) -> Result<()> {
+    let mut rules = Rules::load(&std::env::current_dir()?)?;
+    if let Some(n) = forget {
+        let rule = rules.remove(n.checked_sub(1).context("rules are numbered from 1")?)?;
+        println!("Removed: always {} in {}", rule.label(), rule.project);
+        return Ok(());
+    }
+    if rules.rules.is_empty() {
+        println!("No saved rules. Answer `p` when calx asks to run a tool to save one.");
+        return Ok(());
+    }
+    let here = rules.project().display().to_string();
+    for (i, rule) in rules.rules.iter().enumerate() {
+        let place = if rule.project == here {
+            format!("{DIM}this project{RESET}")
+        } else {
+            format!("{DIM}{}{RESET}", rule.project)
+        };
+        println!("{:>3}  {}  {place}", i + 1, rule.label());
+    }
+    println!(
+        "\n{DIM}Saved in {}. Remove one with `calx rules --forget <N>`.{RESET}",
+        rules.path().display()
+    );
+    Ok(())
 }
 
 fn list_sessions() -> Result<()> {
@@ -228,8 +263,9 @@ async fn chat(cli: &Cli) -> Result<()> {
         );
     }
 
+    let rules = Rules::load(std::path::Path::new(&cwd))?;
     let mut simple =
-        marginalia::Marginalia::new(cli.yes, status::Tally::new(&agent), cli.while_busy);
+        marginalia::Marginalia::new(cli.yes, rules, status::Tally::new(&agent), cli.while_busy);
     if !cli.prompt.is_empty() {
         let before = agent.items.len();
         if simple.turn(&mut agent, &cli.prompt.join(" ")).await? {
@@ -244,7 +280,8 @@ async fn chat(cli: &Cli) -> Result<()> {
         );
     if panels {
         let info = carrels::Info::new(&agent, &shell, &cwd);
-        let mut app = carrels::App::new(&agent, info, cli.yes, std::mem::take(&mut simple.tally));
+        let tally = std::mem::take(&mut simple.tally);
+        let mut app = carrels::App::new(&agent, info, cli.yes, simple.rules, tally);
         app.always = simple.always;
         app.busy = cli.while_busy;
         app.set_prompt_keys(cli.prompt_keys);

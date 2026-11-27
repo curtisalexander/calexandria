@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use calx_core::agent::{Agent, Approval, DECLINED, MAX_STEPS, SKIPPED};
+use calx_core::approvals::{Rule, Rules};
 use calx_core::message::{Event, Exposure, Item};
 use crossterm::event::{
     DisableBracketedPaste, EnableBracketedPaste, Event as Input, EventStream, KeyCode, KeyEvent,
@@ -179,6 +180,8 @@ pub struct App {
     pub yes: bool,
     /// Tools the user answered "always" for, this session.
     pub always: HashSet<String>,
+    /// Approvals saved for this project.
+    rules: Rules,
     pub tally: Tally,
     info: Info,
     entries: Vec<Entry>,
@@ -218,10 +221,11 @@ enum Outcome {
 }
 
 impl App {
-    pub fn new(agent: &Agent, info: Info, yes: bool, tally: Tally) -> Self {
+    pub fn new(agent: &Agent, info: Info, yes: bool, rules: Rules, tally: Tally) -> Self {
         let mut app = Self {
             yes,
             always: HashSet::new(),
+            rules,
             tally,
             info,
             entries: Vec::new(),
@@ -404,6 +408,8 @@ impl App {
         self.pending = Some((ask, answer));
     }
 
+    /// Answers the pending approval; `always` also allows the tool for the
+    /// rest of the session.
     fn answer(&mut self, yes: bool, always: bool) {
         if let Some((ask, tx)) = self.pending.take() {
             if always {
@@ -414,6 +420,25 @@ impl App {
             }
             let _ = tx.send(yes);
         }
+    }
+
+    /// The rule `p` would save for the pending approval.
+    fn suggested_rule(&self) -> Option<Rule> {
+        let (ask, _) = self.pending.as_ref()?;
+        Rule::suggest(self.rules.project(), ask)
+    }
+
+    /// Saves a rule allowing the pending call in this project, and runs it.
+    fn allow_in_project(&mut self) {
+        let Some(rule) = self.suggested_rule() else {
+            return;
+        };
+        let label = rule.label();
+        match self.rules.add(rule) {
+            Ok(()) => self.note(format!("Saved: always {label} in this project."), false),
+            Err(e) => self.note(format!("could not save the rule: {e:#}"), true),
+        }
+        self.answer(true, false);
     }
 
     /// Keys that work while a turn runs and when idle. Returns whether it used the key.
@@ -522,6 +547,7 @@ impl App {
                 KeyCode::Esc => return true,
                 KeyCode::Char('y') => self.answer(true, false),
                 KeyCode::Char('a') => self.answer(true, true),
+                KeyCode::Char('p') => self.allow_in_project(),
                 KeyCode::Char('n') => self.answer(false, false),
                 KeyCode::Char('?') => self.show_why = !self.show_why,
                 _ => {}
@@ -717,20 +743,29 @@ impl App {
     }
 
     fn input_line(&mut self, f: &mut Frame, area: Rect) {
+        let rule = self.suggested_rule();
         let line = match (&self.pending, self.running) {
-            (Some((ask, _)), _) => Line::from(vec![
-                bold(question(&ask.name)),
-                Span::raw("  "),
-                bold("y"),
-                Span::raw(" yes  "),
-                bold("n"),
-                Span::raw(" no  "),
-                bold("a"),
-                Span::raw(" always this session  "),
-                bold("?"),
-                Span::raw(" why  "),
-                dim("· Esc stops the turn"),
-            ]),
+            (Some((ask, _)), _) => {
+                let mut spans = vec![
+                    bold(question(&ask.name)),
+                    Span::raw("  "),
+                    bold("y"),
+                    Span::raw(" yes  "),
+                    bold("n"),
+                    Span::raw(" no  "),
+                    bold("a"),
+                    Span::raw(" always this session  "),
+                ];
+                if let Some(rule) = &rule {
+                    spans.push(bold("p"));
+                    spans.push(Span::raw(format!(
+                        " always {} in this project  ",
+                        rule.label()
+                    )));
+                }
+                spans.extend([bold("?"), Span::raw(" why  "), dim("· Esc stops the turn")]);
+                Line::from(spans)
+            }
             (None, Some((started, step))) if self.input.is_empty() => Line::from(dim(format!(
                 "working · request {step} · {} · type and Enter to {}, Alt-Enter to {} · Esc stops",
                 status::duration(started.elapsed().as_millis() as u64),
@@ -1101,13 +1136,17 @@ impl App {
                 if e.egress { "E" } else { "·" }
             );
             let policy = if self.yes {
-                "runs (-y)"
+                "runs (-y)".to_string()
             } else if !asks {
-                "runs"
+                "runs".to_string()
             } else if self.always.contains(*name) {
-                "runs (always)"
+                "runs (always)".to_string()
             } else {
-                "asks"
+                match self.rules.here().filter(|r| r.tool == *name).count() {
+                    0 => "asks".to_string(),
+                    1 => "asks, 1 rule".to_string(),
+                    n => format!("asks, {n} rules"),
+                }
             };
             lines.push(kv(name, format!("{legs}  {policy}"), width));
         }
@@ -1133,6 +1172,7 @@ impl App {
             row("effort", i.effort.clone().unwrap_or("none".into())),
             row("approvals", if self.yes { "none (-y)".into() } else { "ask".into() }),
             row("always this session", if always.is_empty() { "–".into() } else { always.join(", ") }),
+            row("saved rules here", self.rules.here().count().to_string()),
             row(
                 "while busy, Enter / Alt-Enter",
                 format!("{} / {}", self.busy.name(), alternative(self.busy).name()),
@@ -1147,6 +1187,8 @@ impl App {
             row("shell", i.shell.clone()),
             row("layout", LAYOUTS[self.layout].0.to_string()),
             row("context window", format!("{} (assumed)", status::tokens(status::CONTEXT_WINDOW))),
+            Line::default(),
+            dim(format!("Rules for this project ({}): `calx rules` lists them all.", self.rules.project().display())).into(),
             Line::default(),
             dim("Read-only for now. Set them with --model or CALX_MODEL, --effort or CALX_EFFORT, --while-busy or CALX_WHILE_BUSY, --prompt-keys or CALX_PROMPT_KEYS, -y, and CALX_SHELL.").into(),
         ]
@@ -1255,7 +1297,7 @@ async fn turn(
         let mut approve = async |ask: Approval| -> bool {
             {
                 let a = app.borrow();
-                if a.yes || a.always.contains(&ask.name) {
+                if a.yes || a.always.contains(&ask.name) || a.rules.allowing(&ask).is_some() {
                     return true;
                 }
             }
