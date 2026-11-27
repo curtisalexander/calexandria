@@ -91,6 +91,9 @@ pub enum Event {
         squishes: usize,
         attempts: u32,
     },
+    /// The linter's verdict on the plan from compaction request `attempt`:
+    /// no problems means it was accepted.
+    CompactionPlan { attempt: u32, problems: Vec<String> },
     /// Compaction gave up; the conversation goes on as it was.
     CompactionFailed { reason: String },
     /// A message the user sent during the turn was added as item `seq`.

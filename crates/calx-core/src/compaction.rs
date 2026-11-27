@@ -493,12 +493,22 @@ impl Agent {
             } else {
                 match parse(&text.join("\n")) {
                     Ok(plan) => match lint(&visible, &plan) {
-                        Ok(()) => return Ok((plan, attempt)),
+                        Ok(()) => {
+                            on_event(Event::CompactionPlan {
+                                attempt,
+                                problems: Vec::new(),
+                            });
+                            return Ok((plan, attempt));
+                        }
                         Err(problems) => problems,
                     },
                     Err(problem) => vec![problem],
                 }
             };
+            on_event(Event::CompactionPlan {
+                attempt,
+                problems: problems.clone(),
+            });
             last_problems = problems.join("; ");
             scratch.extend(reply.items);
             // Every call needs an answer, or the next request is rejected.

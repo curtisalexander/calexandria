@@ -31,8 +31,9 @@ Early. Today calx can:
   and a status line after each turn shows context use, cache hits, and which
   legs of the lethal trifecta the session has opened. *Carrels* (`calx -p`, or
   `/panels` in a conversation) is a full-screen view with tiles for the
-  conversation, the pending diff, the tool log, stats, context use, calx itself,
-  and its settings. It needs 140 columns; narrower terminals get the *Reading
+  conversation, the pending diff, the tool log, a trace of every model request
+  (what each step sent, cost, and returned, including compaction attempts and
+  why a plan was refused), stats, context use, calx itself, and its settings. It needs 140 columns; narrower terminals get the *Reading
   room*, the conversation plus one side panel.
 
 ## Install
@@ -191,8 +192,7 @@ the Keychain to ask once after each update whether calx may use its key.
 
 1. Editing approval rules from the panel view.
 2. Fit the gateway sign-in to the real work gateway once its details are known.
-3. Terminal UI next steps: a Trace view of every request in a turn, and
-   editable Prefs.
+3. Terminal UI next step: editable Prefs.
 4. Memory, and extensions written in Python.
 
 Longer-term ideas, such as where tools run and codemode, are in

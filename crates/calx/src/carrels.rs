@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use calx_core::agent::{Agent, Approval, DECLINED, MAX_STEPS, SKIPPED};
 use calx_core::approvals::{Rule, Rules};
-use calx_core::message::{Event, Exposure, Item};
+use calx_core::message::{Event, Exposure, Item, Usage};
 use crossterm::event::{
     DisableBracketedPaste, EnableBracketedPaste, Event as Input, EventStream, KeyCode, KeyEvent,
     KeyEventKind, KeyModifiers,
@@ -39,13 +39,15 @@ pub enum Panel {
     Context,
     Inspect,
     Prefs,
+    Trace,
 }
 
 impl Panel {
     /// The side panels in the order Tab visits them.
-    const ALL: [Panel; 6] = [
+    const ALL: [Panel; 7] = [
         Panel::Diff,
         Panel::Tools,
+        Panel::Trace,
         Panel::Stats,
         Panel::Context,
         Panel::Inspect,
@@ -60,6 +62,7 @@ impl Panel {
             Panel::Context => "Context",
             Panel::Inspect => "Self",
             Panel::Prefs => "Prefs",
+            Panel::Trace => "Trace",
         }
     }
 }
@@ -68,7 +71,7 @@ impl Panel {
 pub const LAYOUTS: [(&str, [Panel; 3]); 3] = [
     ("coding", [Panel::Diff, Panel::Tools, Panel::Stats]),
     ("research", [Panel::Context, Panel::Tools, Panel::Stats]),
-    ("inspect", [Panel::Context, Panel::Inspect, Panel::Tools]),
+    ("inspect", [Panel::Trace, Panel::Inspect, Panel::Context]),
 ];
 
 /// What the body of the screen shows at a width.
@@ -172,6 +175,32 @@ enum Entry {
     },
 }
 
+const TRACE_HEADER: &str = "step    sent     in   +added  cache   out    time  → result";
+
+/// One line of the Trace panel: a prompt, then the requests it took.
+enum Trace {
+    Turn { seq: usize, text: String },
+    Request(Request),
+}
+
+/// One model request, for the Trace panel.
+#[derive(Default)]
+struct Request {
+    /// The step in the turn, or `None` for a compaction request.
+    step: Option<usize>,
+    /// Items sent, §1 to this.
+    sent: usize,
+    /// `None` until the request finishes.
+    usage: Option<Usage>,
+    duration_ms: u64,
+    /// The tools the reply called, and the estimated tokens of its text.
+    calls: Vec<String>,
+    text: u64,
+    /// For a compaction request, the linter's problems with its plan, once
+    /// known; empty when the plan was accepted.
+    problems: Option<Vec<String>>,
+}
+
 /// Estimated tokens by kind, for the Context panel. The model counts the real
 /// total; these show where it goes.
 #[derive(Default)]
@@ -192,6 +221,10 @@ pub struct App {
     entries: Vec<Entry>,
     tools: Vec<ToolRow>,
     mix: Mix,
+    /// Every request this run, by turn, for the Trace panel.
+    trace: Vec<Trace>,
+    /// Whether requests now are compaction's.
+    compacting: bool,
     input: Editor,
     prompt_keys: Keys,
     /// Conversation lines scrolled up from the bottom.
@@ -236,6 +269,8 @@ impl App {
             entries: Vec::new(),
             tools: Vec::new(),
             mix: Mix::default(),
+            trace: Vec::new(),
+            compacting: false,
             input: Editor::plain(),
             prompt_keys: Keys::Plain,
             scroll: 0,
@@ -345,6 +380,53 @@ impl App {
         }
     }
 
+    /// Records requests and what they produced, for the Trace panel.
+    fn observe_trace(&mut self, event: &Event) {
+        let last = self.trace.iter_mut().rev().find_map(|t| match t {
+            Trace::Request(r) => Some(r),
+            Trace::Turn { .. } => None,
+        });
+        match event {
+            Event::RequestStarted { step, items } => self.trace.push(Trace::Request(Request {
+                step: Some(*step),
+                sent: *items,
+                ..Request::default()
+            })),
+            Event::CompactionStarted { .. } => self.compacting = true,
+            Event::Compacted { .. } | Event::CompactionFailed { .. } => self.compacting = false,
+            // Compaction requests report only when they finish.
+            Event::RequestFinished { usage, duration_ms } if self.compacting => {
+                self.trace.push(Trace::Request(Request {
+                    usage: Some(*usage),
+                    duration_ms: *duration_ms,
+                    ..Request::default()
+                }))
+            }
+            Event::RequestFinished { usage, duration_ms } => {
+                if let Some(r) = last {
+                    r.usage = Some(*usage);
+                    r.duration_ms = *duration_ms;
+                }
+            }
+            Event::CompactionPlan { problems, .. } => {
+                if let Some(r) = last {
+                    r.problems = Some(problems.clone());
+                }
+            }
+            Event::TextDelta(delta) => {
+                if let Some(r) = last {
+                    r.text += status::estimate(delta);
+                }
+            }
+            Event::ToolStarted { name, .. } => {
+                if let Some(r) = last {
+                    r.calls.push(name.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// Recounts the Context panel's parts from what the model sees now,
     /// which compaction shrinks.
     fn remix(&mut self, agent: &Agent) {
@@ -372,6 +454,7 @@ impl App {
 
     fn observe(&mut self, event: Event) {
         self.tally.observe(&event);
+        self.observe_trace(&event);
         match event {
             Event::RequestStarted { step, items } => {
                 if let Some((_, current)) = &mut self.running {
@@ -397,6 +480,7 @@ impl App {
             Event::RequestFinished { .. } => {}
             Event::CompactionStarted { .. }
             | Event::Compacted { .. }
+            | Event::CompactionPlan { .. }
             | Event::CompactionFailed { .. } => {
                 if let Event::Compacted { seq, .. } = event {
                     self.items = seq;
@@ -951,7 +1035,22 @@ impl App {
     }
 
     fn panel(&self, f: &mut Frame, area: Rect, panel: Panel, tabs: bool) {
-        let title = if tabs {
+        let all_tabs: usize = Panel::ALL
+            .iter()
+            .map(|p| p.title().len() + 1)
+            .sum::<usize>()
+            + 1;
+        let title = if tabs && all_tabs + 2 > area.width as usize {
+            // Too narrow for every tab: the current one, and where it is.
+            let at = Panel::ALL.iter().position(|p| *p == panel).unwrap_or(0) + 1;
+            Line::from(vec![
+                Span::styled(
+                    format!(" ‹ {} › ", panel.title()),
+                    Style::new().fg(Color::Cyan),
+                ),
+                dim(format!("{at}/{} · Tab ", Panel::ALL.len())),
+            ])
+        } else if tabs {
             let mut spans = vec![Span::raw(" ")];
             for p in Panel::ALL {
                 let style = if p == panel {
@@ -971,8 +1070,15 @@ impl App {
         let block = Block::bordered()
             .border_style(Style::new().fg(Color::DarkGray))
             .title(title);
-        let inner = block.inner(area);
+        let mut inner = block.inner(area);
         f.render_widget(block, area);
+        // The Trace columns' header stays put while the rows scroll under it.
+        if panel == Panel::Trace && !self.trace.is_empty() && inner.height > 1 {
+            let header = Rect { height: 1, ..inner };
+            f.render_widget(Paragraph::new(Line::from(dim(TRACE_HEADER))), header);
+            inner.y += 1;
+            inner.height -= 1;
+        }
         let width = inner.width as usize;
         let (lines, stick_to_bottom) = match panel {
             Panel::Diff => (self.diff_lines(), false),
@@ -981,6 +1087,7 @@ impl App {
             Panel::Context => (self.context_lines(width), false),
             Panel::Inspect => (self.self_lines(width), false),
             Panel::Prefs => (self.prefs_lines(width), false),
+            Panel::Trace => (self.trace_lines(), true),
         };
         let paragraph = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });
         let top = if stick_to_bottom {
@@ -1064,6 +1171,88 @@ impl App {
                 )),
                 Span::styled(state, Style::new().fg(color)),
             ]));
+        }
+        lines
+    }
+
+    /// Every request this run: what it sent, what it cost, and what came
+    /// back, so a slow or expensive turn can be read step by step.
+    fn trace_lines(&self) -> Vec<Line<'_>> {
+        if self.trace.is_empty() {
+            return vec![dim("No requests yet this run.").into()];
+        }
+        let mut lines = Vec::new();
+        let mut previous_in = 0;
+        for t in &self.trace {
+            let r = match t {
+                Trace::Turn { seq, text } => {
+                    lines.push(Line::from(vec![
+                        bold(format!("§{seq} ")),
+                        Span::raw(one_line(text, 80)),
+                    ]));
+                    continue;
+                }
+                Trace::Request(r) => r,
+            };
+            let (what, sent) = match r.step {
+                Some(step) => (format!("{step:<4}"), format!("§1–§{}", r.sent)),
+                None => ("plan".to_string(), String::new()),
+            };
+            let mut spans = vec![Span::raw(format!("{what}{sent:>8}"))];
+            let Some(u) = r.usage else {
+                spans.push(dim("  waiting for the model…"));
+                lines.push(Line::from(spans));
+                continue;
+            };
+            let added = match r.step {
+                Some(_) if previous_in > 0 => {
+                    let d = u.input_tokens as i64 - previous_in as i64;
+                    let sign = if d < 0 { "−" } else { "+" };
+                    format!("{sign}{}", status::tokens(d.unsigned_abs()))
+                }
+                _ => String::new(),
+            };
+            if r.step.is_some() {
+                previous_in = u.input_tokens;
+            }
+            let cache = match u.input_tokens {
+                0 => "–".to_string(),
+                n => format!("{}%", u.cached_input_tokens * 100 / n),
+            };
+            spans.push(Span::raw(format!(
+                "{:>7}{:>9}{:>7}{:>6}{:>8}  ",
+                status::tokens(u.input_tokens),
+                added,
+                cache,
+                status::tokens(u.output_tokens),
+                status::duration(r.duration_ms),
+            )));
+            match &r.problems {
+                Some(p) if p.is_empty() => spans.push(Span::styled(
+                    "→ plan accepted",
+                    Style::new().fg(Color::Green),
+                )),
+                Some(_) => spans.push(Span::styled(
+                    "→ plan refused",
+                    Style::new().fg(Color::Yellow),
+                )),
+                None if r.step.is_none() => spans.push(dim("→ planning")),
+                None if !r.calls.is_empty() => {
+                    spans.push(Span::raw(format!("→ {}", r.calls.join(", "))))
+                }
+                None if r.text > 0 => spans.push(Span::raw(format!(
+                    "→ reply, ~{} tok",
+                    status::tokens(r.text)
+                ))),
+                None => spans.push(dim("→ nothing")),
+            }
+            lines.push(Line::from(spans));
+            for problem in r.problems.iter().flatten() {
+                lines.push(Line::from(Span::styled(
+                    format!("        · {problem}"),
+                    Style::new().fg(Color::Yellow),
+                )));
+            }
         }
         lines
     }
@@ -1309,7 +1498,14 @@ async fn main_loop(
             "/exit" | "/quit" => return Ok(()),
             "/compact" => {
                 let before = agent.items.len();
-                app.borrow_mut().running = Some((Instant::now(), 1));
+                {
+                    let mut a = app.borrow_mut();
+                    a.running = Some((Instant::now(), 1));
+                    a.trace.push(Trace::Turn {
+                        seq: before + 1,
+                        text: "/compact".into(),
+                    });
+                }
                 let compacted = {
                     let mut on_event = |event: Event| app.borrow_mut().observe(event);
                     let run = agent.compact(&mut on_event);
@@ -1367,6 +1563,10 @@ async fn turn(
         a.running = Some((Instant::now(), 1));
         a.mix.messages += status::estimate(prompt);
         a.entries.push(Entry::User {
+            seq: before + 1,
+            text: prompt.to_string(),
+        });
+        a.trace.push(Trace::Turn {
             seq: before + 1,
             text: prompt.to_string(),
         });

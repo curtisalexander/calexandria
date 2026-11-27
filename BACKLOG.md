@@ -10,7 +10,6 @@ everything here, or in this order; the README roadmap is the near-term plan.
   - backtest the linter's limits (keep 15–70%, the latest 4 items, under half
     per rewrite) on real saved sessions, and tune them;
   - look up each model's real context window instead of assuming 400k;
-  - a Trace view of compaction attempts: each plan and why the linter refused it.
 - **History lives in SQLite** (`sessions.db`): an append-only `items` table
   with stable per-session sequence numbers, which compaction records can point at.
   Next: full-text search over sessions (SQLite FTS5) and memory in the same database.
