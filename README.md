@@ -125,7 +125,8 @@ Esc stops it only from normal mode with an empty prompt.
 In the plain view, a paste of several lines is one prompt, and a line that ends
 with `\` continues on the next, as in a shell. When calx asks to run a tool, answer `y` yes, `n` no, `a`
 always for that tool this session, `p` always in this project, or `?` for why
-it asks.
+it asks. For a shell command, `e` lets you change the command before it runs;
+the model is told what actually ran.
 
 `p` saves a rule to `~/.calx/approvals.json`, never in the project, so a
 repository you clone cannot approve its own commands. A project is the git

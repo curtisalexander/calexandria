@@ -268,8 +268,8 @@ impl Agent {
             ),
             _ if skip => (SKIPPED.to_string(), true),
             (Some(tool), Ok(mut args)) => {
-                let editable = (name == crate::memory::REMEMBER)
-                    .then(|| args["text"].as_str().unwrap_or_default().to_string());
+                let field = tool.editable();
+                let editable = field.map(|f| args[f].as_str().unwrap_or_default().to_string());
                 let answer = if tool.needs_approval() {
                     approve(Approval {
                         seq,
@@ -284,23 +284,22 @@ impl Agent {
                     Answer::Yes
                 };
                 // The model learns what the user changed, so it does not
-                // go on believing its own wording was saved.
-                let edited = match answer {
-                    Answer::No => None,
-                    Answer::Yes => Some(None),
-                    Answer::Edited(text) => {
-                        args["text"] = text.clone().into();
-                        Some(Some(text))
+                // go on believing its own version ran or was saved.
+                let edited = match (answer, field) {
+                    (Answer::No, _) => None,
+                    (Answer::Edited(text), Some(field)) => {
+                        args[field] = text.clone().into();
+                        Some(Some(format!(
+                            "[The user changed `{field}` before approving it, to: {text}]"
+                        )))
                     }
+                    _ => Some(None),
                 };
                 if let Some(edited) = edited {
                     started = Instant::now();
                     match tokio::task::spawn_blocking(move || tool.run(args)).await {
                         Ok(Ok(output)) => match edited {
-                            Some(text) => (
-                                format!("{output} The user rewrote it before saving it as: {text}"),
-                                false,
-                            ),
+                            Some(note) => (format!("{note}\n{output}"), false),
                             None => (output, false),
                         },
                         Ok(Err(e)) => (format!("Error: {e:#}"), true),

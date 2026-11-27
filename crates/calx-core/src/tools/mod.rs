@@ -36,6 +36,11 @@ pub trait Tool: Send + Sync {
     fn preview(&self, _args: &Value) -> Option<String> {
         None
     }
+    /// The argument the user may rewrite when approving a call, such as a
+    /// shell command; it must be a string.
+    fn editable(&self) -> Option<&'static str> {
+        None
+    }
     /// Which legs of the lethal trifecta this tool opens.
     fn exposure(&self) -> Exposure {
         Exposure::default()

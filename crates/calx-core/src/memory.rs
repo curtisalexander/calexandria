@@ -388,6 +388,10 @@ impl Tool for Remember {
         true
     }
 
+    fn editable(&self) -> Option<&'static str> {
+        Some("text")
+    }
+
     fn summary(&self, args: &Value) -> String {
         args["text"].as_str().unwrap_or("?").replace('\n', " ")
     }

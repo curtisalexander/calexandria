@@ -47,6 +47,10 @@ impl Tool for ShellTool {
         }
     }
 
+    fn editable(&self) -> Option<&'static str> {
+        Some("command")
+    }
+
     fn needs_approval(&self) -> bool {
         true
     }
