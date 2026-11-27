@@ -26,6 +26,7 @@ use tokio::sync::oneshot;
 use crate::editor::{Editor, Keys};
 use crate::marginalia::one_line;
 use crate::notes::Notes;
+use crate::settings::{self, Settings};
 use crate::status::{self, Busy, Tally};
 
 /// The narrowest terminal that shows the tiles; narrower ones get the Reading room.
@@ -175,6 +176,26 @@ enum Entry {
     },
 }
 
+/// The settings Prefs can change, in order.
+const PREFS: [&str; 7] = [
+    "model",
+    "effort",
+    "compact at",
+    "approvals",
+    "while busy, Enter",
+    "prompt keys",
+    "layout",
+];
+
+const EFFORTS: [&str; 5] = ["none", "low", "medium", "high", "xhigh"];
+
+/// The Prefs row chosen, and its text while one is typed.
+#[derive(Default)]
+struct PrefsEdit {
+    row: usize,
+    text: Option<String>,
+}
+
 const TRACE_HEADER: &str = "step    sent     in   +added  cache   out    time  → result";
 
 /// One line of the Trace panel: a prompt, then the requests it took.
@@ -218,6 +239,12 @@ pub struct App {
     rules: Rules,
     pub tally: Tally,
     info: Info,
+    /// The Prefs being edited, while they have focus.
+    prefs: Option<PrefsEdit>,
+    /// Saved defaults, which `s` in Prefs updates.
+    pub settings: Settings,
+    /// Names this server among the saved defaults.
+    pub server_key: String,
     entries: Vec<Entry>,
     tools: Vec<ToolRow>,
     mix: Mix,
@@ -266,6 +293,9 @@ impl App {
             rules,
             tally,
             info,
+            prefs: None,
+            settings: Settings::default(),
+            server_key: String::new(),
             entries: Vec::new(),
             tools: Vec::new(),
             mix: Mix::default(),
@@ -675,7 +705,7 @@ impl App {
             return true;
         }
         // In the notes, Esc only leaves them, and y or n is just text.
-        if self.common_key(&key) || self.notes_key(&key) {
+        if self.common_key(&key) || self.notes_key(&key) || self.prefs_key(&key) {
             return false;
         }
         if self.pending.is_some() {
@@ -760,12 +790,12 @@ impl App {
         let where_ = match &arrangement {
             Arrangement::Tiles(_) => {
                 format!(
-                    "layout: {} · Ctrl-L next · Ctrl-N notes",
+                    "layout: {} · Ctrl-L next · Ctrl-N notes · Ctrl-P prefs",
                     LAYOUTS[self.layout].0
                 )
             }
             Arrangement::ReadingRoom(_) => {
-                "reading room · Tab next panel · Ctrl-N notes".to_string()
+                "reading room · Tab next panel · Ctrl-N notes · Ctrl-P prefs".to_string()
             }
         };
         let effort = self.info.effort.as_deref().unwrap_or("no reasoning");
@@ -783,6 +813,12 @@ impl App {
 
         match arrangement {
             Arrangement::Tiles([under, top, bottom]) => {
+                // No layout shows Prefs, so editing them borrows the top tile.
+                let top = if self.prefs.is_some() {
+                    Panel::Prefs
+                } else {
+                    top
+                };
                 let [left, right] =
                     Layout::horizontal([Constraint::Percentage(56), Constraint::Fill(1)])
                         .areas(body);
@@ -1408,33 +1444,209 @@ impl App {
         let row = |label: &str, value: String| kv(label, value, width);
         let mut always: Vec<&str> = self.always.iter().map(String::as_str).collect();
         always.sort();
-        vec![
-            row("model", i.model.clone()),
+        let values = [
+            i.model.clone(),
+            i.effort.clone().unwrap_or("none (not sent)".into()),
+            i.compact_at
+                .map_or("never".into(), |n| format!("{} tokens", status::tokens(n))),
+            if self.yes {
+                "none: tools run without asking".into()
+            } else {
+                "ask".into()
+            },
+            format!(
+                "{} (Alt-Enter: {})",
+                self.busy.name(),
+                alternative(self.busy).name()
+            ),
+            match self.prompt_keys {
+                Keys::Plain => "plain".into(),
+                Keys::Vim => "vim".into(),
+            },
+            LAYOUTS[self.layout].0.to_string(),
+        ];
+        let mut lines = Vec::new();
+        for (n, (label, value)) in PREFS.iter().zip(values).enumerate() {
+            let selected = self.prefs.as_ref().filter(|e| e.row == n);
+            let value = match selected.and_then(|e| e.text.as_ref()) {
+                Some(text) => format!("{text}▏"),
+                None => value,
+            };
+            let mut line = row(label, value);
+            if selected.is_some() {
+                line = line.style(Style::new().add_modifier(Modifier::REVERSED));
+            } else if n == 3 && self.yes {
+                line = line.style(Style::new().fg(Color::Red));
+            }
+            lines.push(line);
+        }
+        lines.push(if self.prefs.is_some() {
+            Line::from(Span::styled(
+                "↑↓ choose · ←→ or Enter change · s save as defaults · Esc done",
+                Style::new().fg(Color::Cyan),
+            ))
+        } else {
+            dim("Ctrl-P changes these, from the next request on.").into()
+        });
+        lines.extend([
+            Line::default(),
             row("backend", i.backend.clone()),
-            row("effort", i.effort.clone().unwrap_or("none".into())),
-            row("compact at", i.compact_at.map_or("never".into(), |n| format!("{} tokens", status::tokens(n)))),
-            row("approvals", if self.yes { "none (-y)".into() } else { "ask".into() }),
+            row("shell", i.shell.clone()),
             row("always this session", if always.is_empty() { "–".into() } else { always.join(", ") }),
             row("saved rules here", self.rules.here().count().to_string()),
-            row(
-                "while busy, Enter / Alt-Enter",
-                format!("{} / {}", self.busy.name(), alternative(self.busy).name()),
-            ),
-            row(
-                "prompt keys",
-                match self.prompt_keys {
-                    Keys::Plain => "plain".into(),
-                    Keys::Vim => "vim".into(),
-                },
-            ),
-            row("shell", i.shell.clone()),
-            row("layout", LAYOUTS[self.layout].0.to_string()),
             row("context window", format!("{} (assumed)", status::tokens(status::CONTEXT_WINDOW))),
             Line::default(),
             dim(format!("Rules for this project ({}): `calx rules` lists them all.", self.rules.project().display())).into(),
-            Line::default(),
-            dim("Read-only for now. Set them with --model or CALX_MODEL, --api, --base-url, and --key (CALX_API, CALX_BASE_URL, CALX_KEY), --effort or CALX_EFFORT, --while-busy or CALX_WHILE_BUSY, --prompt-keys or CALX_PROMPT_KEYS, --compact-at or CALX_COMPACT_AT, -y, and CALX_SHELL.").into(),
-        ]
+            dim("Saved defaults are in settings.json in the calx home; the model and effort are saved for this server only, and approvals never. A flag or CALX_ variable overrides a saved default. The backend comes from --api, --base-url, --key, and --gateway; the shell from CALX_SHELL.").into(),
+        ]);
+        lines
+    }
+
+    /// Edits the Prefs while they have focus (Ctrl-P). Returns whether it used the key.
+    fn prefs_key(&mut self, key: &KeyEvent) -> bool {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        if ctrl && key.code == KeyCode::Char('p') {
+            if self.prefs.take().is_none() {
+                self.prefs = Some(PrefsEdit::default());
+                self.side = Panel::Prefs;
+            }
+            return true;
+        }
+        let Some(edit) = &mut self.prefs else {
+            return false;
+        };
+        let row = edit.row;
+        if let Some(text) = &mut edit.text {
+            match key.code {
+                KeyCode::Char(c) if !ctrl => text.push(c),
+                KeyCode::Backspace => {
+                    text.pop();
+                }
+                KeyCode::Esc => edit.text = None,
+                KeyCode::Enter => {
+                    let text = edit.text.take().unwrap_or_default();
+                    self.set_pref(row, text.trim());
+                }
+                _ => {}
+            }
+            return true;
+        }
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => edit.row = row.saturating_sub(1),
+            KeyCode::Down | KeyCode::Char('j') => edit.row = (row + 1).min(PREFS.len() - 1),
+            KeyCode::Right | KeyCode::Char('l' | ' ') | KeyCode::Enter => self.change_pref(row, 1),
+            KeyCode::Left | KeyCode::Char('h') => self.change_pref(row, -1),
+            KeyCode::Char('s') => self.save_prefs(),
+            KeyCode::Esc => self.prefs = None,
+            // Ctrl-C and Ctrl-D still quit.
+            KeyCode::Char('c' | 'd') if ctrl => return false,
+            _ => {}
+        }
+        true
+    }
+
+    /// Steps a setting to its next or previous value, or starts typing one.
+    fn change_pref(&mut self, row: usize, by: isize) {
+        fn step<T: PartialEq + Copy>(all: &[T], now: T, by: isize) -> T {
+            let at = all.iter().position(|v| *v == now).unwrap_or(0) as isize;
+            all[(at + by).rem_euclid(all.len() as isize) as usize]
+        }
+        match row {
+            0 => self.start_typing(self.info.model.clone()),
+            1 => {
+                let now = self.info.effort.as_deref().unwrap_or("none");
+                let next = step(&EFFORTS, now, by);
+                self.info.effort = (next != "none").then(|| next.to_string());
+            }
+            2 => {
+                let now = self
+                    .info
+                    .compact_at
+                    .map_or("never".into(), |n| format!("{}k", n / 1000));
+                self.start_typing(now);
+            }
+            3 => self.yes = !self.yes,
+            4 => {
+                use clap::ValueEnum;
+                self.busy = step(Busy::value_variants(), self.busy, by);
+            }
+            5 => {
+                let keys = step(&[Keys::Plain, Keys::Vim], self.prompt_keys, by);
+                let text = self.input.take();
+                self.set_prompt_keys(keys);
+                self.input.set(&text);
+            }
+            _ => {
+                self.layout =
+                    (self.layout as isize + by).rem_euclid(LAYOUTS.len() as isize) as usize
+            }
+        }
+    }
+
+    fn start_typing(&mut self, text: String) {
+        if let Some(edit) = &mut self.prefs {
+            edit.text = Some(text);
+        }
+    }
+
+    /// Sets a typed setting: the model, or the size to compact at.
+    fn set_pref(&mut self, row: usize, text: &str) {
+        match row {
+            0 if !text.is_empty() => self.info.model = text.to_string(),
+            2 => match settings::parse_tokens(text) {
+                Some(at) => self.info.compact_at = at,
+                None => self.note(
+                    format!("{text:?} is not a token count; try 200k, 150000, or never"),
+                    true,
+                ),
+            },
+            _ => {}
+        }
+    }
+
+    /// Saves the settings as defaults, except approvals.
+    fn save_prefs(&mut self) {
+        let i = &self.info;
+        let s = &mut self.settings;
+        s.while_busy = Some(self.busy);
+        s.prompt_keys = Some(self.prompt_keys);
+        s.compact_at = Some(i.compact_at.unwrap_or(0));
+        s.layout = Some(LAYOUTS[self.layout].0.to_string());
+        s.servers.insert(
+            self.server_key.clone(),
+            settings::Server {
+                model: Some(i.model.clone()),
+                effort: Some(i.effort.clone().unwrap_or("none".into())),
+            },
+        );
+        match s.save() {
+            Ok(path) => self.note(
+                format!(
+                    "Saved as defaults in {} (the model and effort for {}). Approvals are not saved.",
+                    path.display(),
+                    self.server_key
+                ),
+                false,
+            ),
+            Err(e) => self.note(format!("could not save settings: {e:#}"), true),
+        }
+    }
+
+    /// Sets the layout by name, if there is one by that name.
+    pub fn set_layout(&mut self, name: Option<&str>) {
+        if let Some(at) = LAYOUTS.iter().position(|l| Some(l.0) == name) {
+            self.layout = at;
+        }
+    }
+
+    /// Hands the agent the model, effort, and compaction size from Prefs.
+    fn apply(&self, agent: &mut Agent) {
+        agent.model.clone_from(&self.info.model);
+        agent.effort.clone_from(&self.info.effort);
+        if agent.compact_at != self.info.compact_at {
+            agent.compact_at = self.info.compact_at;
+            agent.compact_again_at = 0;
+        }
     }
 }
 
@@ -1481,7 +1693,11 @@ async fn main_loop(
                         KeyCode::Char('c') if ctrl => return Ok(()),
                         _ => {}
                     }
-                    if a.common_key(&key) || a.notes_key(&key) || a.prompt_key(key) {
+                    if a.common_key(&key)
+                        || a.notes_key(&key)
+                        || a.prefs_key(&key)
+                        || a.prompt_key(key)
+                    {
                         continue;
                     }
                     match key.code {
@@ -1500,6 +1716,7 @@ async fn main_loop(
                 let before = agent.items.len();
                 {
                     let mut a = app.borrow_mut();
+                    a.apply(agent);
                     a.running = Some((Instant::now(), 1));
                     a.trace.push(Trace::Turn {
                         seq: before + 1,
@@ -1558,6 +1775,7 @@ async fn turn(
     let before = agent.items.len();
     {
         let mut a = app.borrow_mut();
+        a.apply(agent);
         a.tally.start_turn();
         a.scroll = 0;
         a.running = Some((Instant::now(), 1));

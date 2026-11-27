@@ -2,6 +2,7 @@ mod carrels;
 mod editor;
 mod marginalia;
 mod notes;
+mod settings;
 mod status;
 
 use std::io::BufRead;
@@ -79,19 +80,21 @@ struct Cli {
     resume: Option<String>,
 
     /// What a prompt sent while calx is working does: steer the running turn
-    /// at its next pause, queue it for after the turn, or stop the turn and send it.
-    #[arg(long, env = "CALX_WHILE_BUSY", value_enum, default_value_t = status::Busy::Steer)]
-    while_busy: status::Busy,
+    /// at its next pause, queue it for after the turn, or stop the turn and
+    /// send it. Default: steer.
+    #[arg(long, env = "CALX_WHILE_BUSY", value_enum)]
+    while_busy: Option<status::Busy>,
 
-    /// Keys for editing the prompt in the panel view: plain, or vim.
-    #[arg(long, env = "CALX_PROMPT_KEYS", value_enum, default_value_t = editor::Keys::Plain)]
-    prompt_keys: editor::Keys,
+    /// Keys for editing the prompt in the panel view: plain, or vim. Default: plain.
+    #[arg(long, env = "CALX_PROMPT_KEYS", value_enum)]
+    prompt_keys: Option<editor::Keys>,
 
     /// Compact the conversation once its context reaches this many tokens:
     /// the model trims old tool output and condenses old items, and the
     /// originals stay in the session. 0 turns it off; /compact does it now.
-    #[arg(long, env = "CALX_COMPACT_AT", value_name = "TOKENS", default_value_t = calx_core::compaction::DEFAULT_COMPACT_AT)]
-    compact_at: u64,
+    /// Default: 200000.
+    #[arg(long, env = "CALX_COMPACT_AT", value_name = "TOKENS")]
+    compact_at: Option<u64>,
 
     /// Start in the panel view instead of plain scrolling output.
     #[arg(long, short = 'p', conflicts_with = "prompt")]
@@ -377,8 +380,12 @@ fn read_secret(prompt: &str) -> Result<String> {
     result.map(|()| text.trim().to_string())
 }
 
-/// The model client the flags choose.
-fn client(cli: &Cli) -> Result<(Client, String, Option<String>)> {
+/// The model client the flags choose, with the model and effort from the
+/// flags, else those saved for its server, and the server's settings key.
+fn client(
+    cli: &Cli,
+    saved: &settings::Settings,
+) -> Result<(Client, String, Option<String>, String)> {
     let api = match cli.api {
         ApiArg::Responses => Api::Responses,
         ApiArg::Chat => Api::Chat,
@@ -411,18 +418,26 @@ fn client(cli: &Cli) -> Result<(Client, String, Option<String>)> {
     } else {
         Auth::None
     };
-    let model = match (&cli.model, api) {
+    let key = settings::server_key(
+        match api {
+            Api::Responses => "responses",
+            Api::Chat => "chat",
+        },
+        &base_url,
+    );
+    let server = saved.servers.get(&key).cloned().unwrap_or_default();
+    let model = match (cli.model.clone().or(server.model), api) {
         (Some(model), _) => model.clone(),
         (None, Api::Responses) => "gpt-6.2-sol".to_string(),
         (None, Api::Chat) => anyhow::bail!("name the model with -m, such as -m qwen3:8b"),
     };
-    let effort = match (&cli.effort, api) {
+    let effort = match (cli.effort.clone().or(server.effort), api) {
         (Some(e), _) if e == "none" => None,
-        (Some(e), _) => Some(e.clone()),
+        (Some(e), _) => Some(e),
         (None, Api::Responses) => Some("medium".to_string()),
         (None, Api::Chat) => None,
     };
-    Ok((Client::new(api, &base_url, auth), model, effort))
+    Ok((Client::new(api, &base_url, auth), model, effort, key))
 }
 
 fn rules(forget: Option<usize>) -> Result<()> {
@@ -490,7 +505,13 @@ fn ago(ms: u64) -> String {
 }
 
 async fn chat(cli: &Cli) -> Result<()> {
-    let (client, model, effort) = client(cli)?;
+    let saved = settings::Settings::load()?;
+    let (client, model, effort, server_key) = client(cli, &saved)?;
+    let while_busy = cli.while_busy.or(saved.while_busy).unwrap_or_default();
+    let compact_at = cli
+        .compact_at
+        .or(saved.compact_at)
+        .unwrap_or(calx_core::compaction::DEFAULT_COMPACT_AT);
     let env = LocalEnvironment::current()?;
     let cwd = env.working_dir();
     let shell = env.shell_name().to_string();
@@ -519,7 +540,7 @@ async fn chat(cli: &Cli) -> Result<()> {
         session_id,
         items,
         context_tokens: 0,
-        compact_at: (cli.compact_at > 0).then_some(cli.compact_at),
+        compact_at: (compact_at > 0).then_some(compact_at),
         compact_again_at: 0,
     };
     // Saves the items a finished turn added. A turn that fails or is
@@ -540,7 +561,7 @@ async fn chat(cli: &Cli) -> Result<()> {
 
     let rules = Rules::load(std::path::Path::new(&cwd))?;
     let mut simple =
-        marginalia::Marginalia::new(cli.yes, rules, status::Tally::new(&agent), cli.while_busy);
+        marginalia::Marginalia::new(cli.yes, rules, status::Tally::new(&agent), while_busy);
     if !cli.prompt.is_empty() {
         let before = agent.items.len();
         if simple.turn(&mut agent, &cli.prompt.join(" ")).await? {
@@ -558,8 +579,11 @@ async fn chat(cli: &Cli) -> Result<()> {
         let tally = std::mem::take(&mut simple.tally);
         let mut app = carrels::App::new(&agent, info, cli.yes, simple.rules, tally);
         app.always = simple.always;
-        app.busy = cli.while_busy;
-        app.set_prompt_keys(cli.prompt_keys);
+        app.busy = while_busy;
+        app.set_prompt_keys(cli.prompt_keys.or(saved.prompt_keys).unwrap_or_default());
+        app.set_layout(saved.layout.as_deref());
+        app.server_key = server_key;
+        app.settings = saved;
         carrels::run(app, &mut agent, &save).await?;
     }
     Ok(())

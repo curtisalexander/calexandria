@@ -110,7 +110,18 @@ pub fn ran(output: &str) -> bool {
 }
 
 /// What a prompt sent while a turn runs does.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Default,
+    clap::ValueEnum,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[serde(rename_all = "lowercase")]
 pub enum Busy {
     /// Read by the model at the next pause in the turn.
     #[default]

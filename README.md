@@ -33,7 +33,7 @@ Early. Today calx can:
   `/panels` in a conversation) is a full-screen view with tiles for the
   conversation, the pending diff, the tool log, a trace of every model request
   (what each step sent, cost, and returned, including compaction attempts and
-  why a plan was refused), stats, context use, calx itself, and its settings. It needs 140 columns; narrower terminals get the *Reading
+  why a plan was refused), stats, context use, calx itself, and its settings, which Ctrl-P edits. It needs 140 columns; narrower terminals get the *Reading
   room*, the conversation plus one side panel.
 
 ## Install
@@ -158,6 +158,12 @@ returns at most about 10k tokens per call. `/compact` compacts now, in either vi
 or when the browser cannot reach that port, paste the URL the browser ends on
 into the terminal instead.
 
+In the panel view, Ctrl-P edits the model, effort, compaction size, approvals,
+typing while busy, prompt keys, and layout. Changes apply from the next request,
+and `s` saves them as defaults in `~/.calx/settings.json`. The model and
+effort are saved for that server only, so a local model is never sent to
+OpenAI. Approvals are never saved. A flag or variable below overrides a saved default.
+
 | Setting | Flag | Environment variable | Default |
 |---|---|---|---|
 | Model | `-m`, `--model` | `CALX_MODEL` | `gpt-6.2-sol` (Responses only) |
@@ -192,8 +198,7 @@ the Keychain to ask once after each update whether calx may use its key.
 
 1. Editing approval rules from the panel view.
 2. Fit the gateway sign-in to the real work gateway once its details are known.
-3. Terminal UI next step: editable Prefs.
-4. Memory, and extensions written in Python.
+3. Memory, and extensions written in Python.
 
 Longer-term ideas, such as where tools run and codemode, are in
 [BACKLOG.md](BACKLOG.md).

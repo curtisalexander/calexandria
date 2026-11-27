@@ -13,7 +13,18 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 
 /// Which keys the prompt edits with.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Default,
+    clap::ValueEnum,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[serde(rename_all = "lowercase")]
 pub enum Keys {
     #[default]
     Plain,
