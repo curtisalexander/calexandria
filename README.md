@@ -135,7 +135,9 @@ shell syntax in it (`;`, `&&`, `|`, `$(`, redirects), and calx offers none for
 such a command; an `edit` or `write` rule allows paths inside the project after
 following symlinks, but not inside `.git`. A rule for a program such as
 `python3` trusts it with any arguments, so save those with care. `calx rules`
-lists the rules and `calx rules --forget <N>` removes one.
+lists the rules and `calx rules --forget <N>` removes one. In the panel view,
+Ctrl-P lists this project's rules under Prefs: `d` removes one, Enter edits a
+shell rule's command, and the last row adds a shell rule.
 
 Every conversation is saved to `~/.calx/sessions.db` (SQLite) after each turn,
 including what the tools read, so treat it as private as your files.
@@ -196,9 +198,8 @@ the Keychain to ask once after each update whether calx may use its key.
 
 ## Roadmap
 
-1. Editing approval rules from the panel view.
-2. Fit the gateway sign-in to the real work gateway once its details are known.
-3. Memory, and extensions written in Python.
+1. Fit the gateway sign-in to the real work gateway once its details are known.
+2. Memory, and extensions written in Python.
 
 Longer-term ideas, such as where tools run and codemode, are in
 [BACKLOG.md](BACKLOG.md).

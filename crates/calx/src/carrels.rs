@@ -1480,9 +1480,41 @@ impl App {
             }
             lines.push(line);
         }
+        lines.push(Line::default());
+        lines.push(
+            dim(format!(
+                "approval rules for {}",
+                self.rules.project().display()
+            ))
+            .into(),
+        );
+        let indices = self.rules.here_indices();
+        let add = PREFS.len() + indices.len();
+        for (n, at) in (PREFS.len()..).zip(indices.iter().chain([&usize::MAX])) {
+            let selected = self.prefs.as_ref().filter(|e| e.row == n);
+            let typed = selected.and_then(|e| e.text.as_ref());
+            let mut line = match (self.rules.rules.get(*at), typed) {
+                (Some(r), Some(text)) => row(&r.tool, format!("`{text}▏ …`")),
+                (Some(r), None) => row(&r.tool, format!("always {}", r.label())),
+                (None, Some(text)) => row("shell", format!("`{text}▏ …`")),
+                (None, None) if self.prefs.is_some() || n == add && indices.is_empty() => {
+                    dim(if indices.is_empty() {
+                        "none yet · + add a shell rule"
+                    } else {
+                        "+ add a shell rule"
+                    })
+                    .into()
+                }
+                (None, None) => continue,
+            };
+            if selected.is_some() {
+                line = line.style(Style::new().add_modifier(Modifier::REVERSED));
+            }
+            lines.push(line);
+        }
         lines.push(if self.prefs.is_some() {
             Line::from(Span::styled(
-                "↑↓ choose · ←→ or Enter change · s save as defaults · Esc done",
+                "↑↓ choose · ←→ or Enter change · d remove a rule · s save as defaults · Esc done",
                 Style::new().fg(Color::Cyan),
             ))
         } else {
@@ -1493,10 +1525,9 @@ impl App {
             row("backend", i.backend.clone()),
             row("shell", i.shell.clone()),
             row("always this session", if always.is_empty() { "–".into() } else { always.join(", ") }),
-            row("saved rules here", self.rules.here().count().to_string()),
             row("context window", format!("{} (assumed)", status::tokens(status::CONTEXT_WINDOW))),
             Line::default(),
-            dim(format!("Rules for this project ({}): `calx rules` lists them all.", self.rules.project().display())).into(),
+            dim("A shell rule allows commands starting with its words, never ones with shell syntax; an edit or write rule allows files in the project outside .git. `calx rules` lists every project's.").into(),
             dim("Saved defaults are in settings.json in the calx home; the model and effort are saved for this server only, and approvals never. A flag or CALX_ variable overrides a saved default. The backend comes from --api, --base-url, --key, and --gateway; the shell from CALX_SHELL.").into(),
         ]);
         lines
@@ -1533,7 +1564,10 @@ impl App {
         }
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => edit.row = row.saturating_sub(1),
-            KeyCode::Down | KeyCode::Char('j') => edit.row = (row + 1).min(PREFS.len() - 1),
+            KeyCode::Down | KeyCode::Char('j') => {
+                edit.row = (row + 1).min(PREFS.len() + self.rules.here_indices().len())
+            }
+            KeyCode::Char('d') if !ctrl => self.remove_rule(row),
             KeyCode::Right | KeyCode::Char('l' | ' ') | KeyCode::Enter => self.change_pref(row, 1),
             KeyCode::Left | KeyCode::Char('h') => self.change_pref(row, -1),
             KeyCode::Char('s') => self.save_prefs(),
@@ -1550,6 +1584,16 @@ impl App {
         fn step<T: PartialEq + Copy>(all: &[T], now: T, by: isize) -> T {
             let at = all.iter().position(|v| *v == now).unwrap_or(0) as isize;
             all[(at + by).rem_euclid(all.len() as isize) as usize]
+        }
+        if row >= PREFS.len() {
+            match self.rule_at(row).map(|r| r.prefix.clone()) {
+                Some(Some(prefix)) => self.start_typing(prefix),
+                Some(None) => {
+                    self.note("This rule has nothing to edit; d removes it.".into(), false)
+                }
+                None => self.start_typing(String::new()),
+            }
+            return;
         }
         match row {
             0 => self.start_typing(self.info.model.clone()),
@@ -1591,6 +1635,9 @@ impl App {
 
     /// Sets a typed setting: the model, or the size to compact at.
     fn set_pref(&mut self, row: usize, text: &str) {
+        if row >= PREFS.len() {
+            return self.set_rule(row, text);
+        }
         match row {
             0 if !text.is_empty() => self.info.model = text.to_string(),
             2 => match settings::parse_tokens(text) {
@@ -1601,6 +1648,56 @@ impl App {
                 ),
             },
             _ => {}
+        }
+    }
+
+    /// The position in `rules.rules` of the rule on Prefs row `row`, if it is one.
+    fn rule_index(&self, row: usize) -> Option<usize> {
+        self.rules
+            .here_indices()
+            .get(row.checked_sub(PREFS.len())?)
+            .copied()
+    }
+
+    fn rule_at(&self, row: usize) -> Option<&Rule> {
+        self.rules.rules.get(self.rule_index(row)?)
+    }
+
+    /// Saves a typed shell rule: a new one on the add row, else a change.
+    fn set_rule(&mut self, row: usize, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        let rule = match Rule::shell(self.rules.project(), text) {
+            Ok(rule) => rule,
+            Err(e) => return self.note(format!("{e:#}"), true),
+        };
+        let label = rule.label();
+        let saved = match self.rule_index(row) {
+            Some(at) => self.rules.replace(at, rule),
+            None => self.rules.add(rule),
+        };
+        match saved {
+            Ok(()) => self.note(format!("Saved: always {label} in this project."), false),
+            Err(e) => self.note(format!("could not save the rule: {e:#}"), true),
+        }
+    }
+
+    /// Removes the rule on Prefs row `row`, so its tool asks again.
+    fn remove_rule(&mut self, row: usize) {
+        let Some(at) = self.rule_index(row) else {
+            return;
+        };
+        match self.rules.remove(at) {
+            Ok(rule) => {
+                let note = format!("Removed: always {}. calx will ask again.", rule.label());
+                self.note(note, false);
+            }
+            Err(e) => self.note(format!("could not remove the rule: {e:#}"), true),
+        }
+        let last = PREFS.len() + self.rules.here_indices().len();
+        if let Some(edit) = &mut self.prefs {
+            edit.row = edit.row.min(last);
         }
     }
 

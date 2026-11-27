@@ -47,6 +47,25 @@ impl Rule {
         })
     }
 
+    /// A shell rule allowing commands that start with `prefix`, typed by the
+    /// user. It refuses shell syntax, which no command a rule matches may have.
+    pub fn shell(project: &Path, prefix: &str) -> Result<Rule> {
+        let words: Vec<&str> = prefix.split_whitespace().collect();
+        anyhow::ensure!(
+            !words.is_empty(),
+            "a shell rule needs a command, such as `cargo test`"
+        );
+        anyhow::ensure!(
+            !prefix.contains(SHELL_SYNTAX),
+            "a shell rule cannot hold shell syntax (; & | < > $ ` ( ) or newlines)"
+        );
+        Ok(Rule {
+            project: project.display().to_string(),
+            tool: "shell".into(),
+            prefix: Some(words.join(" ")),
+        })
+    }
+
     /// What it allows, for the user: "`cargo test …`", or a tool name such as "edit".
     pub fn label(&self) -> String {
         match &self.prefix {
@@ -123,6 +142,21 @@ impl Rules {
     pub fn here(&self) -> impl Iterator<Item = &Rule> {
         let project = self.project.display().to_string();
         self.rules.iter().filter(move |r| r.project == project)
+    }
+
+    /// The positions in [`Rules::rules`] of this project's rules.
+    pub fn here_indices(&self) -> Vec<usize> {
+        let project = self.project.display().to_string();
+        (0..self.rules.len())
+            .filter(|&i| self.rules[i].project == project)
+            .collect()
+    }
+
+    /// Replaces the rule at `index` and saves the file.
+    pub fn replace(&mut self, index: usize, rule: Rule) -> Result<()> {
+        anyhow::ensure!(index < self.rules.len(), "there is no rule {}", index + 1);
+        self.rules[index] = rule;
+        self.save()
     }
 
     /// Adds a rule and saves the file.
@@ -272,6 +306,13 @@ mod tests {
             "a flag is not a subcommand"
         );
         assert_eq!(command_prefix("git status | head"), None);
+
+        // Typed rules: whitespace is tidied, shell syntax refused.
+        let typed = Rule::shell(Path::new("/p"), "  npm   run  ").unwrap();
+        assert_eq!(typed.prefix.as_deref(), Some("npm run"));
+        for bad in ["", "   ", "make; curl x", "ls > f", "echo $(id)"] {
+            assert!(Rule::shell(Path::new("/p"), bad).is_err(), "{bad:?}");
+        }
     }
 
     #[test]
