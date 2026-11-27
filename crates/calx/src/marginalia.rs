@@ -111,7 +111,7 @@ impl Marginalia {
         save: &dyn Fn(&Agent, usize),
     ) -> Result<Exit> {
         println!(
-            "{DIM}calx · {} · session {} · type while it works to {} · /panels for panels · /exit to quit{RESET}",
+            "{DIM}calx · {} · session {} · type while it works to {} · /compact · /panels for panels · /exit to quit{RESET}",
             agent.model,
             &agent.session_id[..8],
             self.busy.name()
@@ -135,6 +135,17 @@ impl Marginalia {
                 "" => continue,
                 "/exit" | "/quit" => return Ok(Exit::Quit),
                 "/panels" => return Ok(Exit::Panels),
+                "/compact" => {
+                    let before = agent.items.len();
+                    let tally = &mut self.tally;
+                    let mut on_event = |event: Event| {
+                        tally.observe(&event);
+                        print_compaction(&event);
+                    };
+                    if agent.compact(&mut on_event).await {
+                        save(agent, before);
+                    }
+                }
                 prompt => {
                     let before = agent.items.len();
                     match self.turn(agent, prompt).await {
@@ -252,6 +263,10 @@ impl Marginalia {
                     let _ = writeln!(out, "\n{DIM}§{seq:<4}{RESET}{BOLD}you{RESET} {text}");
                 }
                 Event::RequestStarted { .. } | Event::RequestFinished { .. } => {}
+                event => {
+                    end_line(&mut out, &mut line);
+                    print_compaction(&event);
+                }
             }
             let _ = out.flush();
         };
@@ -583,6 +598,19 @@ async fn gather(
             return text;
         }
     }
+}
+
+/// Prints a compaction event on its own line, numbered when it added an item.
+fn print_compaction(event: &Event) {
+    let Some((text, error)) = status::compaction_note(event) else {
+        return;
+    };
+    let seq = match event {
+        Event::Compacted { seq, .. } => format!("§{seq}"),
+        _ => String::new(),
+    };
+    let color = if error { RED } else { DIM };
+    println!("{DIM}{seq:<MARGIN$}{RESET}{color}{text}{RESET}");
 }
 
 fn is_handoff(line: &str) -> bool {

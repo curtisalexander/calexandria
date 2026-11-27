@@ -101,6 +101,7 @@ pub struct Info {
     pub tools: Vec<(&'static str, Exposure, bool)>,
     pub tool_tokens: u64,
     pub started: Instant,
+    pub compact_at: Option<u64>,
 }
 
 impl Info {
@@ -131,6 +132,7 @@ impl Info {
             tools,
             tool_tokens,
             started: Instant::now(),
+            compact_at: agent.compact_at,
         }
     }
 }
@@ -313,14 +315,51 @@ impl App {
                         row.output = output.clone();
                     }
                 }
+                Item::Compaction {
+                    before,
+                    after,
+                    trims,
+                    squishes,
+                    attempts,
+                } => {
+                    let event = Event::Compacted {
+                        seq,
+                        before: *before,
+                        after: *after,
+                        trims: trims.len(),
+                        squishes: squishes.len(),
+                        attempts: *attempts,
+                    };
+                    if let Some((text, error)) = status::compaction_note(&event) {
+                        self.note(format!("§{seq} {text}"), error);
+                    }
+                }
             }
         }
+        self.remix(agent);
         if !agent.items.is_empty() {
             self.note(
                 format!("Resumed session ({} items).", agent.items.len()),
                 false,
             );
         }
+    }
+
+    /// Recounts the Context panel's parts from what the model sees now,
+    /// which compaction shrinks.
+    fn remix(&mut self, agent: &Agent) {
+        let mut mix = Mix::default();
+        for item in calx_core::compaction::request_items(&agent.items) {
+            match item {
+                Item::User { text } | Item::Assistant { text, .. } => {
+                    mix.messages += status::estimate(&text)
+                }
+                Item::Reasoning { summary, .. } => mix.reasoning += status::estimate(&summary),
+                Item::ToolResult { output, .. } => mix.tool_output += status::estimate(&output),
+                Item::ToolCall { .. } | Item::Compaction { .. } => {}
+            }
+        }
+        self.mix = mix;
     }
 
     fn row(&mut self, seq: usize) -> Option<&mut ToolRow> {
@@ -356,6 +395,16 @@ impl App {
                 }
             }
             Event::RequestFinished { .. } => {}
+            Event::CompactionStarted { .. }
+            | Event::Compacted { .. }
+            | Event::CompactionFailed { .. } => {
+                if let Event::Compacted { seq, .. } = event {
+                    self.items = seq;
+                }
+                if let Some((text, error)) = status::compaction_note(&event) {
+                    self.note(text, error);
+                }
+            }
             Event::Steered { seq, text } => {
                 self.mix.messages += status::estimate(&text);
                 self.items = seq;
@@ -1174,6 +1223,7 @@ impl App {
             row("model", i.model.clone()),
             row("backend", i.backend.clone()),
             row("effort", i.effort.clone().unwrap_or("none".into())),
+            row("compact at", i.compact_at.map_or("never".into(), |n| format!("{} tokens", status::tokens(n)))),
             row("approvals", if self.yes { "none (-y)".into() } else { "ask".into() }),
             row("always this session", if always.is_empty() { "–".into() } else { always.join(", ") }),
             row("saved rules here", self.rules.here().count().to_string()),
@@ -1194,7 +1244,7 @@ impl App {
             Line::default(),
             dim(format!("Rules for this project ({}): `calx rules` lists them all.", self.rules.project().display())).into(),
             Line::default(),
-            dim("Read-only for now. Set them with --model or CALX_MODEL, --api, --base-url, and --key (CALX_API, CALX_BASE_URL, CALX_KEY), --effort or CALX_EFFORT, --while-busy or CALX_WHILE_BUSY, --prompt-keys or CALX_PROMPT_KEYS, -y, and CALX_SHELL.").into(),
+            dim("Read-only for now. Set them with --model or CALX_MODEL, --api, --base-url, and --key (CALX_API, CALX_BASE_URL, CALX_KEY), --effort or CALX_EFFORT, --while-busy or CALX_WHILE_BUSY, --prompt-keys or CALX_PROMPT_KEYS, --compact-at or CALX_COMPACT_AT, -y, and CALX_SHELL.").into(),
         ]
     }
 }
@@ -1257,6 +1307,31 @@ async fn main_loop(
         match prompt.trim() {
             "" => {}
             "/exit" | "/quit" => return Ok(()),
+            "/compact" => {
+                let before = agent.items.len();
+                app.borrow_mut().running = Some((Instant::now(), 1));
+                let compacted = {
+                    let mut on_event = |event: Event| app.borrow_mut().observe(event);
+                    let run = agent.compact(&mut on_event);
+                    tokio::pin!(run);
+                    // Keys wait in the terminal until it is done.
+                    let mut tick = tokio::time::interval(Duration::from_millis(80));
+                    loop {
+                        terminal.draw(|f| app.borrow_mut().draw(f))?;
+                        tokio::select! {
+                            compacted = &mut run => break compacted,
+                            _ = tick.tick() => {}
+                        }
+                    }
+                };
+                if compacted {
+                    save(agent, before);
+                }
+                let mut a = app.borrow_mut();
+                a.running = None;
+                a.remix(agent);
+                a.items = agent.items.len();
+            }
             prompt => {
                 // Then any prompts queued or sent with a stop during it.
                 let mut next = Some(prompt.to_string());
@@ -1373,6 +1448,7 @@ async fn turn(
         }
     }
     a.items = agent.items.len();
+    a.remix(agent);
     Ok(done)
 }
 

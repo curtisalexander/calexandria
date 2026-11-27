@@ -4,6 +4,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::compaction::{Squish, Trim};
+
 /// One entry in a conversation, in order.
 ///
 /// `raw` holds the item exactly as the provider returned it, for providers
@@ -34,6 +36,17 @@ pub enum Item {
     ToolResult {
         call_id: String,
         output: String,
+    },
+    /// A compaction of the items before it. The model never sees this item;
+    /// each request sends the history with it applied ([`crate::compaction::view`]).
+    Compaction {
+        trims: Vec<Trim>,
+        squishes: Vec<Squish>,
+        /// Tokens in the context before and after, as best calx can tell.
+        before: u64,
+        after: u64,
+        /// How many plans the model proposed until one passed the linter.
+        attempts: u32,
     },
 }
 
@@ -67,6 +80,19 @@ pub enum Event {
         summary: String,
         exposure: Exposure,
     },
+    /// The conversation is about `tokens` long, and calx is compacting it.
+    CompactionStarted { tokens: u64 },
+    /// A compaction was added as item `seq`.
+    Compacted {
+        seq: usize,
+        before: u64,
+        after: u64,
+        trims: usize,
+        squishes: usize,
+        attempts: u32,
+    },
+    /// Compaction gave up; the conversation goes on as it was.
+    CompactionFailed { reason: String },
     /// A message the user sent during the turn was added as item `seq`.
     Steered { seq: usize, text: String },
     /// A tool finished, or was declined or skipped; `seq` is its call's, as in `ToolStarted`.

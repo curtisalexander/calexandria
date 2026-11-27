@@ -87,6 +87,12 @@ struct Cli {
     #[arg(long, env = "CALX_PROMPT_KEYS", value_enum, default_value_t = editor::Keys::Plain)]
     prompt_keys: editor::Keys,
 
+    /// Compact the conversation once its context reaches this many tokens:
+    /// the model trims old tool output and condenses old items, and the
+    /// originals stay in the session. 0 turns it off; /compact does it now.
+    #[arg(long, env = "CALX_COMPACT_AT", value_name = "TOKENS", default_value_t = calx_core::compaction::DEFAULT_COMPACT_AT)]
+    compact_at: u64,
+
     /// Start in the panel view instead of plain scrolling output.
     #[arg(long, short = 'p', conflicts_with = "prompt")]
     panels: bool,
@@ -512,6 +518,8 @@ async fn chat(cli: &Cli) -> Result<()> {
         effort,
         session_id,
         items,
+        context_tokens: 0,
+        compact_at: (cli.compact_at > 0).then_some(cli.compact_at),
     };
     // Saves the items a finished turn added. A turn that fails or is
     // interrupted is not saved, matching what the next turn sends the model.

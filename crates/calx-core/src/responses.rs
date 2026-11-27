@@ -166,6 +166,7 @@ fn input_item(item: &Item) -> Option<Value> {
             "call_id": call_id,
             "output": output,
         }),
+        Item::Compaction { .. } => return None,
     })
 }
 

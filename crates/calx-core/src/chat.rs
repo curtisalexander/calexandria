@@ -60,7 +60,7 @@ fn messages(request: &Request<'_>) -> Vec<Value> {
                 }
                 _ => out.push(json!({ "role": "assistant", "content": text })),
             },
-            Item::Reasoning { .. } => {}
+            Item::Reasoning { .. } | Item::Compaction { .. } => {}
             Item::ToolCall { call, .. } => {
                 let call = json!({
                     "id": call.id,

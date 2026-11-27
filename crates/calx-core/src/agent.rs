@@ -6,6 +6,7 @@ use std::time::Instant;
 use anyhow::{Result, bail};
 use serde_json::Value;
 
+use crate::compaction;
 use crate::message::{Event, Exposure, Item, ToolCall};
 use crate::provider::{Client, Request};
 use crate::tools::Toolbox;
@@ -28,8 +29,14 @@ pub struct Agent {
     pub effort: Option<String>,
     pub system: String,
     pub session_id: String,
-    /// The whole conversation so far.
+    /// The whole conversation so far, including compaction records. Requests
+    /// send it with the compactions applied.
     pub items: Vec<Item>,
+    /// How many tokens the context took at the latest request, as the server
+    /// counted them; 0 until the first request.
+    pub context_tokens: u64,
+    /// Compact the conversation once it reaches this many tokens; `None` never does.
+    pub compact_at: Option<u64>,
 }
 
 /// A tool call waiting for the user's yes or no.
@@ -71,7 +78,22 @@ impl Agent {
             text: prompt.to_string(),
         });
         let specs = self.toolbox.specs();
+        // At most once a prompt, so a conversation that will not shrink
+        // does not spend every step trying.
+        let mut compacted = false;
         for step in 1..=MAX_STEPS {
+            // Every call has its output here, so compaction sees a whole conversation.
+            if !compacted
+                && let Some(at) = self.compact_at
+                && self
+                    .context_tokens
+                    .max(compaction::view_tokens(&self.items))
+                    >= at
+            {
+                compacted = true;
+                self.compact(on_event).await;
+            }
+            let items = compaction::request_items(&self.items);
             on_event(Event::RequestStarted {
                 step,
                 items: self.items.len(),
@@ -80,7 +102,7 @@ impl Agent {
             let request = Request {
                 model: &self.model,
                 system: &self.system,
-                items: &self.items,
+                items: &items,
                 tools: &specs,
                 effort: self.effort.as_deref(),
                 session_id: &self.session_id,
@@ -90,6 +112,10 @@ impl Agent {
                 usage: reply.usage,
                 duration_ms: elapsed_ms(started),
             });
+            // Some local servers report no usage; the estimate stands in then.
+            if reply.usage.input_tokens > 0 {
+                self.context_tokens = reply.usage.input_tokens + reply.usage.output_tokens;
+            }
             let first = self.items.len() + 1;
             let mut calls = Vec::new();
             let mut text = Vec::new();

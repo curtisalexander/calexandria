@@ -68,6 +68,14 @@ impl Tally {
                 self.turn_model_ms += duration_ms;
                 self.history.push(usage.input_tokens);
             }
+            // The compaction requests were the biggest yet; the context is
+            // what is left, until the next request counts it.
+            Event::Compacted { after, .. } => {
+                self.last = Usage {
+                    input_tokens: *after,
+                    ..Usage::default()
+                };
+            }
             Event::ToolStarted { seq, exposure, .. } => {
                 self.started.insert(*seq, *exposure);
             }
@@ -155,6 +163,34 @@ pub fn why(name: &str, e: Exposure) -> String {
         ""
     };
     format!("{name} changes things and can {opens}.{all}")
+}
+
+/// What a compaction event says, for both views, and whether it is an error.
+pub fn compaction_note(event: &Event) -> Option<(String, bool)> {
+    Some(match event {
+        Event::CompactionStarted { tokens: n } => (
+            format!("compacting the conversation, ~{} tokens…", tokens(*n)),
+            false,
+        ),
+        Event::Compacted {
+            before,
+            after,
+            trims,
+            squishes,
+            attempts,
+            ..
+        } => (
+            format!(
+                "compacted ~{} → ~{} tokens: {trims} trimmed, {squishes} squished, {attempts} {}",
+                tokens(*before),
+                tokens(*after),
+                if *attempts == 1 { "try" } else { "tries" }
+            ),
+            false,
+        ),
+        Event::CompactionFailed { reason } => (format!("could not compact: {reason}"), true),
+        _ => return None,
+    })
 }
 
 /// A token count for display, such as 950, 31.2k, or 400k.

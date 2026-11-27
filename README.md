@@ -15,6 +15,8 @@ Early. Today calx can:
 - **Use other model servers** over Chat Completions, which Ollama, LM Studio,
   MLX (`mlx_lm.server`), vLLM, OpenRouter, and most company gateways speak,
   with no key, or an API key saved encrypted with `calx key set`.
+- **Compact long conversations in place**, after exe.dev's Shelley: the model
+  trims old tool output and condenses old items, and the originals stay saved.
 - **Work as an agent** over OpenAI's Responses API or Chat Completions: it streams the reply and a
   summary of the model's reasoning, and calls tools until the task is done.
 - **Tools:** `read` (files and directories), `grep` and `find` (built on
@@ -137,6 +139,16 @@ lists the rules and `calx rules --forget <N>` removes one.
 Every conversation is saved to `~/.calx/sessions.db` (SQLite) after each turn,
 including what the tools read, so treat it as private as your files.
 
+**Compaction.** Once the context reaches 200k tokens (`--compact-at`), calx
+pauses the turn and shows the model a numbered index of the conversation. The
+model answers with a plan: *trim* tool outputs down to what it still needs, and
+*squish* runs of older items into a condensed record. A linter rejects a plan
+that splits a tool call from its output, touches the latest items, or leaves
+too much or too little, and the model tries again with the reasons, up to three
+times. The plan is saved as one more item in the session; nothing is deleted,
+and every request sends the history with the plans applied, so the model never
+sees the compaction itself. `/compact` compacts now, in either view.
+
 `calx login` opens your browser and waits for it on `127.0.0.1:1455`. Over SSH,
 or when the browser cannot reach that port, paste the URL the browser ends on
 into the terminal instead.
@@ -152,6 +164,7 @@ into the terminal instead.
 | An API key directly, hidden from commands | | `CALX_API_KEY` | |
 | Typing while calx works | `--while-busy` | `CALX_WHILE_BUSY` | `steer` (or `queue`, `stop`) |
 | Prompt keys in the panel view | `--prompt-keys` | `CALX_PROMPT_KEYS` | `plain` (or `vim`) |
+| Compact the context at this many tokens | `--compact-at` | `CALX_COMPACT_AT` | `200000` (`0` never) |
 | Shell for the `shell` tool | | `CALX_SHELL` | bash, else PowerShell |
 | Encryption key, instead of the keychain | | `CALX_AUTH_KEY` | |
 | State directory | | `CALX_HOME` | `~/.calx` |
@@ -178,5 +191,5 @@ the Keychain to ask once after each update whether calx may use its key.
    editable Prefs.
 4. Memory, and extensions written in Python.
 
-Longer-term ideas, such as compaction and where tools run, are in
+Longer-term ideas, such as where tools run and codemode, are in
 [BACKLOG.md](BACKLOG.md).

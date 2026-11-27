@@ -6,6 +6,7 @@ pub mod agent;
 pub mod approvals;
 pub mod auth;
 pub mod chat;
+pub mod compaction;
 pub mod environment;
 pub mod gateway;
 pub mod message;

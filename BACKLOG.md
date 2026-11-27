@@ -6,23 +6,13 @@ everything here, or in this order; the README roadmap is the near-term plan.
 ## Context and history
 
 - **Compaction in place**, after exe.dev's Shelley
-  ([post](https://blog.exe.dev/compaction)). At about 200k tokens (configurable),
-  the harness adds a nudge message and gives the model a compaction tool. The tool:
-  - shows the model an index of the conversation, one sequential ID per item;
-  - lets it trim specific tool outputs and "squish" runs of items into shorter
-    rewritten segments that point back to the originals;
-  - runs a linter that rejects a compaction that removes too much or too little,
-    so the model usually gets it right on the second try.
-
-  Compaction is stored as its own record in the append-only history. When the
-  harness builds a request, it swaps the compacted ranges for their rewrites, so
-  the model never sees the compaction itself, and nothing is lost: the originals
-  stay in the history and the model can look them up. Shelley's two earlier
-  designs (restart with a summary; restart keeping recent messages) were
-  replaced by this one.
-
-  Needs first: saved sessions, stable item IDs, and a running context-size count
-  (calx already reads token usage from every response).
+  ([post](https://blog.exe.dev/compaction)): built (`compaction.rs`). Next:
+  - let the model read a compacted original back (the IDs in a condensed
+    record point at items still in `sessions.db`);
+  - backtest the linter's limits (keep 15–70%, the latest 4 items, under half
+    per rewrite) on real saved sessions, and tune them;
+  - look up each model's real context window instead of assuming 400k;
+  - a Trace view of compaction attempts: each plan and why the linter refused it.
 - **History lives in SQLite** (`sessions.db`): an append-only `items` table
   with stable per-session sequence numbers, which compaction records can point at.
   Next: full-text search over sessions (SQLite FTS5) and memory in the same database.
