@@ -9,14 +9,20 @@
 //! The plan is saved as an [`Item::Compaction`] in the append-only history,
 //! and nothing is deleted. Each request sends [`view`] of the history: the
 //! items with every compaction so far applied, and without the compaction
-//! records themselves, so the model never sees the compaction work.
+//! records themselves, so the model never sees the compaction work. Once a
+//! conversation has a compaction, the model also gets the [`Recall`] tool,
+//! which reads the originals back by their numbers.
+
+use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 
 use crate::agent::Agent;
-use crate::message::{Event, Item};
+use crate::message::{Event, Exposure, Item};
 use crate::provider::Request;
+use crate::tools::{Tool, ToolSpec};
 
 /// The default size, in tokens, at which a turn compacts the conversation.
 pub const DEFAULT_COMPACT_AT: u64 = 200_000;
@@ -82,7 +88,7 @@ pub fn view(items: &[Item]) -> Vec<Visible> {
             if let Some(v) = out.iter_mut().find(|v| v.first == trim.item)
                 && let Item::ToolResult { output, .. } = &mut v.item
             {
-                *output = trimmed(&trim.keep);
+                *output = trimmed(trim.item, &trim.keep);
             }
         }
         for squish in squishes {
@@ -113,13 +119,13 @@ pub fn request_items(items: &[Item]) -> Vec<Item> {
     view(items).into_iter().map(|v| v.item).collect()
 }
 
-fn trimmed(keep: &str) -> String {
-    format!("[Output trimmed; run the tool again for all of it.]\n{keep}")
+fn trimmed(item: usize, keep: &str) -> String {
+    format!("[Output §{item} trimmed; `recall` §{item} reads all of it.]\n{keep}")
 }
 
 fn squished(s: &Squish) -> String {
     format!(
-        "[Condensed record of items §{}–§{}]\n{}",
+        "[Condensed record of items §{}–§{}; `recall` reads the originals.]\n{}",
         s.from, s.to, s.text
     )
 }
@@ -200,6 +206,7 @@ open. Write it so you could carry on from it alone.
 - Keep each tool call in the same range as its output, and leave alone what you still \
 need word for word, and the latest items, §{kept} onward.
 - Aim to leave between a third and two thirds of the conversation.
+- Nothing is lost: afterward the `recall` tool reads any original item by its number.
 
 The conversation, one item per line, with estimated tokens:
 {}",
@@ -354,7 +361,7 @@ fn after_tokens(visible: &[Visible], plan: &Plan) -> u64 {
         .iter()
         .filter_map(|t| {
             let v = visible.iter().find(|v| v.first == t.item)?;
-            Some(estimate(&trimmed(&t.keep)) as i64 - item_tokens(&v.item) as i64)
+            Some(estimate(&trimmed(t.item, &t.keep)) as i64 - item_tokens(&v.item) as i64)
         })
         .sum();
     ((before - squished_away + squishes) as i64 + trims).max(0) as u64
@@ -426,7 +433,7 @@ impl Agent {
         scratch.push(Item::User {
             text: nudge(&visible, tokens),
         });
-        let specs = self.toolbox.specs();
+        let specs = self.specs();
         let mut last_problems = String::new();
         for attempt in 1..=MAX_ATTEMPTS {
             let request = Request {
@@ -495,6 +502,103 @@ impl Agent {
         }
         bail!("no acceptable plan after {MAX_ATTEMPTS} tries: {last_problems}")
     }
+}
+
+/// Most of the conversation one `recall` returns, so reading the originals
+/// back cannot undo the compaction in one call.
+const MAX_RECALL_BYTES: usize = 40_000;
+
+/// Reads items of the conversation as they were before any compaction.
+pub struct Recall {
+    /// The whole history, as it was when the call was made.
+    pub items: Arc<Vec<Item>>,
+}
+
+#[derive(Deserialize)]
+struct RecallArgs {
+    from: usize,
+    to: Option<usize>,
+}
+
+impl Tool for Recall {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: RECALL,
+            description: "Read items of this conversation as they were before it was \
+                compacted, by their § numbers, such as those in a condensed record or a \
+                trimmed output. Use it when you need the exact text, such as a file's \
+                contents or a command's full output, instead of guessing from the record."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "from": { "type": "integer", "description": "First item, such as 12 for §12." },
+                    "to": { "type": "integer", "description": "Last item; default: only `from`." }
+                },
+                "required": ["from"]
+            }),
+        }
+    }
+
+    fn needs_approval(&self) -> bool {
+        false
+    }
+
+    fn summary(&self, args: &Value) -> String {
+        match (args["from"].as_u64(), args["to"].as_u64()) {
+            (Some(a), Some(b)) if b != a => format!("§{a}–§{b}"),
+            (Some(a), _) => format!("§{a}"),
+            _ => "?".into(),
+        }
+    }
+
+    fn exposure(&self) -> Exposure {
+        // It replays what the other tools read: private, and maybe untrusted.
+        Exposure {
+            private: true,
+            untrusted: true,
+            egress: false,
+        }
+    }
+
+    fn run(&self, args: Value) -> Result<String> {
+        let a: RecallArgs = crate::tools::parse_args(args)?;
+        let to = a.to.unwrap_or(a.from);
+        let n = self.items.len();
+        if a.from < 1 || a.from > to || to > n {
+            bail!("items are §1 to §{n}, and `from` must not be after `to`");
+        }
+        let mut out = String::new();
+        for seq in a.from..=to {
+            let text = match &self.items[seq - 1] {
+                Item::User { text } => format!("user:\n{text}"),
+                Item::Assistant { text, .. } => format!("assistant:\n{text}"),
+                Item::Reasoning { summary, .. } => format!("reasoning summary:\n{summary}"),
+                Item::ToolCall { call, .. } => {
+                    format!("call {} ({}):\n{}", call.name, call.id, call.arguments)
+                }
+                Item::ToolResult { call_id, output } => format!("output of {call_id}:\n{output}"),
+                Item::Compaction { .. } => "a compaction record".into(),
+            };
+            let entry = format!("§{seq} {text}\n\n");
+            if !out.is_empty() && out.len() + entry.len() > MAX_RECALL_BYTES {
+                out.push_str(&format!(
+                    "[Stopped before §{seq} to keep this short; recall from §{seq} for the rest.]"
+                ));
+                return Ok(out);
+            }
+            out.push_str(&entry);
+        }
+        Ok(out.trim_end().to_string())
+    }
+}
+
+/// The name of the [`Recall`] tool.
+pub const RECALL: &str = "recall";
+
+/// Whether the history has a compaction, so the model may need [`Recall`].
+pub fn is_compacted(items: &[Item]) -> bool {
+    items.iter().any(|i| matches!(i, Item::Compaction { .. }))
 }
 
 #[cfg(test)]
@@ -604,6 +708,45 @@ mod tests {
         assert_eq!(v[1].first, 10);
         // The originals are still in the history.
         assert_eq!(items[2], history()[2]);
+    }
+
+    #[test]
+    fn recall_reads_originals_and_stops_at_an_item_boundary() {
+        let mut items = history();
+        items.push(Item::Compaction {
+            trims: vec![Trim {
+                item: 8,
+                keep: "short".into(),
+            }],
+            squishes: vec![squish(1, 4, "Fixed the build error in lib.rs.")],
+            before: 0,
+            after: 0,
+            attempts: 1,
+        });
+        let recall = Recall {
+            items: Arc::new(items),
+        };
+        // The trimmed output comes back whole, numbered as in the record.
+        let out = recall.run(json!({ "from": 8 })).unwrap();
+        assert_eq!(out, format!("§8 output of b:\n{}", "x".repeat(4000)));
+        let out = recall.run(json!({ "from": 3, "to": 4 })).unwrap();
+        assert!(out.starts_with("§3 output of a:\nxxx"));
+        assert!(out.ends_with("§4 assistant:\nI read it; the error is in lib.rs."));
+        for bad in [
+            json!({ "from": 0 }),
+            json!({ "from": 5, "to": 4 }),
+            json!({ "from": 15 }),
+        ] {
+            assert!(recall.run(bad).is_err());
+        }
+
+        // A range too big for one call ends between items and says where to go on.
+        let big = Recall {
+            items: Arc::new(vec![output("a", &"z".repeat(30_000)); 3]),
+        };
+        let out = big.run(json!({ "from": 1, "to": 3 })).unwrap();
+        assert!(out.contains("§1 output") && !out.contains("§2 output"));
+        assert!(out.ends_with("recall from §2 for the rest.]"));
     }
 
     #[test]

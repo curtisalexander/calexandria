@@ -41,7 +41,7 @@ impl Tally {
         for item in &agent.items {
             if let Item::ToolCall { call, .. } = item
                 && !declined.contains(call.id.as_str())
-                && let Some(tool) = agent.toolbox.get(&call.name)
+                && let Some(tool) = agent.tool(&call.name)
             {
                 exposure |= tool.exposure();
             }

@@ -147,7 +147,10 @@ that splits a tool call from its output, touches the latest items, or leaves
 too much or too little, and the model tries again with the reasons, up to three
 times. The plan is saved as one more item in the session; nothing is deleted,
 and every request sends the history with the plans applied, so the model never
-sees the compaction itself. `/compact` compacts now, in either view.
+sees the compaction itself. Once a session has been compacted, the model also
+gets a `recall` tool that reads original items back by their `§` numbers, which
+every condensed record and trimmed output carries. It runs without asking, and
+returns at most about 10k tokens per call. `/compact` compacts now, in either view.
 
 `calx login` opens your browser and waits for it on `127.0.0.1:1455`. Over SSH,
 or when the browser cannot reach that port, paste the URL the browser ends on

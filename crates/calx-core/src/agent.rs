@@ -1,6 +1,7 @@
 //! The agent loop: ask the model, run the tools it calls, send back the
 //! results, and repeat until it answers without calling a tool.
 
+use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{Result, bail};
@@ -9,7 +10,7 @@ use serde_json::Value;
 use crate::compaction;
 use crate::message::{Event, Exposure, Item, ToolCall};
 use crate::provider::{Client, Request};
-use crate::tools::Toolbox;
+use crate::tools::{Tool, ToolSpec, Toolbox};
 
 /// Most model requests one prompt may take, so a confused model cannot loop forever.
 pub const MAX_STEPS: usize = 100;
@@ -77,7 +78,6 @@ impl Agent {
         self.items.push(Item::User {
             text: prompt.to_string(),
         });
-        let specs = self.toolbox.specs();
         // At most once a prompt, so a conversation that will not shrink
         // does not spend every step trying.
         let mut compacted = false;
@@ -94,6 +94,7 @@ impl Agent {
                 self.compact(on_event).await;
             }
             let items = compaction::request_items(&self.items);
+            let specs = self.specs();
             on_event(Event::RequestStarted {
                 step,
                 items: self.items.len(),
@@ -159,6 +160,34 @@ impl Agent {
         bail!("stopped after {MAX_STEPS} model requests without a final answer")
     }
 
+    /// The tools to offer: the toolbox, and `recall` once there is a compaction.
+    /// It joins when the conversation's start changes anyway, so it costs
+    /// no prompt cache that compaction did not already.
+    pub fn specs(&self) -> Vec<ToolSpec> {
+        let mut specs = self.toolbox.specs();
+        if compaction::is_compacted(&self.items) {
+            let recall = compaction::Recall {
+                items: Arc::default(),
+            };
+            specs.push(recall.spec());
+        }
+        specs
+    }
+
+    /// A tool by name, as offered by [`Agent::specs`].
+    pub fn tool(&self, name: &str) -> Option<Arc<dyn Tool>> {
+        if name == compaction::RECALL && compaction::is_compacted(&self.items) {
+            return Some(Arc::new(self.recall()));
+        }
+        self.toolbox.get(name)
+    }
+
+    fn recall(&self) -> compaction::Recall {
+        compaction::Recall {
+            items: Arc::new(self.items.clone()),
+        }
+    }
+
     async fn call_tool(
         &self,
         seq: usize,
@@ -169,7 +198,7 @@ impl Agent {
     ) -> String {
         let name = call.name.clone();
         let args: Result<Value, _> = serde_json::from_str(&call.arguments);
-        let tool = self.toolbox.get(&call.name);
+        let tool = self.tool(&call.name);
         let summary = match (&tool, &args) {
             (Some(tool), Ok(args)) => tool.summary(args),
             _ => call.arguments.clone(),

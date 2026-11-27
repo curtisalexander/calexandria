@@ -283,7 +283,7 @@ impl App {
                 Item::ToolCall { call, .. } => {
                     let summary = serde_json::from_str(&call.arguments)
                         .ok()
-                        .zip(agent.toolbox.get(&call.name))
+                        .zip(agent.tool(&call.name))
                         .map(|(args, tool)| tool.summary(&args))
                         .unwrap_or_else(|| call.arguments.clone());
                     self.tools.push(ToolRow {

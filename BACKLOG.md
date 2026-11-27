@@ -7,8 +7,8 @@ everything here, or in this order; the README roadmap is the near-term plan.
 
 - **Compaction in place**, after exe.dev's Shelley
   ([post](https://blog.exe.dev/compaction)): built (`compaction.rs`). Next:
-  - let the model read a compacted original back (the IDs in a condensed
-    record point at items still in `sessions.db`);
+  - after a compaction fails or leaves the context over the limit, wait for
+    it to grow before trying again, instead of trying once every prompt;
   - backtest the linter's limits (keep 15–70%, the latest 4 items, under half
     per rewrite) on real saved sessions, and tune them;
   - look up each model's real context window instead of assuming 400k;
