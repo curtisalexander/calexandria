@@ -1259,11 +1259,21 @@ impl App {
         if self.tools.is_empty() {
             return vec![dim("No tool calls yet.").into()];
         }
-        // § 5, tool 7, time 9, state 8.
-        let target = width.saturating_sub(5 + 7 + 9 + 8).max(8);
+        // The name column fits the longest name shown, such as
+        // search_sessions, plus a gap, up to 16 columns.
+        let name = self
+            .tools
+            .iter()
+            .map(|r| r.name.chars().count())
+            .max()
+            .unwrap_or(0)
+            .clamp(4, 16)
+            + 2;
+        // § 5, then the name, then time 9 and state 8.
+        let target = width.saturating_sub(5 + name + 9 + 8).max(8);
         let mut lines = vec![
             dim(format!(
-                "{:<5}{:<7}{:<target$}{:>8} {}",
+                "{:<5}{:<name$}{:<target$}{:>8} {}",
                 "§", "tool", "target", "time", "state"
             ))
             .into(),
@@ -1280,9 +1290,9 @@ impl App {
             };
             lines.push(Line::from(vec![
                 Span::raw(format!(
-                    "{:<5}{:<7}{:<target$}{:>8} ",
+                    "{:<5}{:<name$}{:<target$}{:>8} ",
                     r.seq,
-                    one_line(&r.name, 6),
+                    one_line(&r.name, name - 2),
                     one_line(&r.summary, target.saturating_sub(2)),
                     time
                 )),
