@@ -13,14 +13,15 @@ use calx_core::message::Event;
 
 use tokio::sync::{Notify, mpsc};
 
+use crate::palette::ansi;
 use crate::status::{self, Busy, Tally};
 
 const DIM: &str = "\x1b[2m";
 const BOLD: &str = "\x1b[1m";
-const RED: &str = "\x1b[31m";
-const GREEN: &str = "\x1b[32m";
-const YELLOW: &str = "\x1b[33m";
-const BLUE: &str = "\x1b[34m";
+const RED: &str = ansi::BRICK;
+const GREEN: &str = ansi::SAGE;
+const YELLOW: &str = ansi::CLAY;
+const BLUE: &str = ansi::LAPIS;
 const RESET: &str = "\x1b[0m";
 
 /// Width of the `§16  ` margin.
@@ -111,13 +112,18 @@ impl Marginalia {
         save: &dyn Fn(&Agent, usize),
     ) -> Result<Exit> {
         println!(
-            "{DIM}calx · {} · session {} · type while it works to {} · /compact · /panels for panels · /exit to quit{RESET}",
+            "{BOLD}{}calx{RESET}{DIM} · {} · session {} · type while it works to {} · /compact · /panels for panels · /exit to quit{RESET}",
+            ansi::AMBER,
             agent.model,
             &agent.session_id[..8],
             self.busy.name()
         );
         loop {
-            print!("\n{DIM}§{:<4}{RESET}{BOLD}>{RESET} ", agent.items.len() + 1);
+            print!(
+                "\n{DIM}§{:<4}{RESET}{BOLD}{}>{RESET} ",
+                agent.items.len() + 1,
+                ansi::AMBER
+            );
             let line = match self.queued.pop_front() {
                 Some(line) => {
                     println!("{line}  {DIM}(sent while busy){RESET}");
@@ -211,7 +217,11 @@ impl Marginalia {
                 } => {
                     end_line(&mut out, &mut line);
                     let summary = one_line(&summary, width.saturating_sub(MARGIN + 30));
-                    let _ = write!(out, "{DIM}§{seq:<4}{RESET} {BOLD}▸ {name}{RESET} {summary}");
+                    let teal = ansi::VERDIGRIS;
+                    let _ = write!(
+                        out,
+                        "{DIM}§{seq:<4}{RESET} {BOLD}{teal}▸ {name}{RESET} {summary}"
+                    );
                     *line = Line::Tool {
                         width: MARGIN + 3 + name.chars().count() + summary.chars().count(),
                     };
@@ -260,7 +270,11 @@ impl Marginalia {
                 Event::Steered { seq, text } => {
                     end_line(&mut out, &mut line);
                     let text = one_line(&text, width.saturating_sub(MARGIN + 5));
-                    let _ = writeln!(out, "\n{DIM}§{seq:<4}{RESET}{BOLD}you{RESET} {text}");
+                    let _ = writeln!(
+                        out,
+                        "\n{DIM}§{seq:<4}{RESET}{BOLD}{}you{RESET} {text}",
+                        ansi::PLUM
+                    );
                 }
                 Event::RequestStarted { .. } | Event::RequestFinished { .. } => {}
                 event => {
@@ -471,7 +485,7 @@ impl Marginalia {
             .iter()
             .filter(|(_, on)| *on)
             .count();
-        let color = if open == 3 { RED } else { YELLOW };
+        let color = if open == 3 { RED } else { ansi::AMBER };
         let legs: Vec<String> = status::legs(t.exposure)
             .iter()
             .map(|(name, on)| {

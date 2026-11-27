@@ -26,6 +26,7 @@ use tokio::sync::oneshot;
 use crate::editor::{Editor, Keys};
 use crate::marginalia::one_line;
 use crate::notes::Notes;
+use crate::palette::{AMBER, BRICK, CLAY, LAPIS, PLUM, SAGE, SLATE, STONE, VERDIGRIS};
 use crate::settings::{self, Settings};
 use crate::status::{self, Busy, Tally};
 
@@ -802,12 +803,15 @@ impl App {
         self.split_line(
             f,
             header,
-            vec![dim(format!(
-                "calx · {} · {} · {effort} · {}",
-                &self.info.session_id[..8],
-                self.info.model,
-                self.info.cwd
-            ))],
+            vec![
+                Span::styled("calx", Style::new().fg(AMBER).add_modifier(Modifier::BOLD)),
+                dim(format!(
+                    " · {} · {} · {effort} · {}",
+                    &self.info.session_id[..8],
+                    self.info.model,
+                    self.info.cwd
+                )),
+            ],
             vec![dim(where_)],
         );
 
@@ -871,14 +875,14 @@ impl App {
             .unwrap_or_default();
         let left = vec![
             dim(format!("§{} · ctx ", self.items + 1)),
-            Span::raw(status::tokens(ctx)),
+            Span::styled(status::tokens(ctx), Style::new().fg(LAPIS)),
             dim(format!(" {}%{cache}", ctx * 100 / status::CONTEXT_WINDOW)),
         ];
         let open = status::legs(t.exposure)
             .iter()
             .filter(|(_, on)| *on)
             .count();
-        let color = if open == 3 { Color::Red } else { Color::Yellow };
+        let color = if open == 3 { BRICK } else { AMBER };
         let mut right = Vec::new();
         for (name, on) in status::legs(t.exposure) {
             right.push(dim(format!("  {name} ")));
@@ -894,13 +898,13 @@ impl App {
     /// The notes, in place of the side panel or the lower right tile.
     fn notes_aside(&mut self, f: &mut Frame, area: Rect) {
         let (border, hint) = if self.notes_focus {
-            (Color::Cyan, " Esc Esc leaves · Ctrl-S to prompt ")
+            (VERDIGRIS, " Esc Esc leaves · Ctrl-S to prompt ")
         } else {
             (Color::DarkGray, " Ctrl-N to edit ")
         };
         let block = Block::bordered()
             .border_style(Style::new().fg(border))
-            .title(Span::styled(" Notes ", Style::new().fg(Color::Yellow)))
+            .title(Span::styled(" Notes ", Style::new().fg(AMBER)))
             .title_bottom(dim(hint));
         let inner = block.inner(area);
         f.render_widget(block, area);
@@ -949,9 +953,9 @@ impl App {
                     Layout::horizontal([Constraint::Length(2), Constraint::Fill(1)]).areas(area);
                 // Vim's normal mode shows in the margin.
                 let mark_span = if self.input.is_normal_mode() {
-                    Span::styled("N ", Style::new().fg(Color::Black).bg(Color::Yellow))
+                    Span::styled("N ", Style::new().fg(Color::Black).bg(AMBER))
                 } else {
-                    Span::styled("> ", Style::new().fg(Color::Cyan))
+                    Span::styled("> ", Style::new().fg(AMBER).add_modifier(Modifier::BOLD))
                 };
                 f.render_widget(mark_span, mark);
                 let focused = !self.notes_focus;
@@ -965,7 +969,7 @@ impl App {
     fn conversation(&self, f: &mut Frame, area: Rect) {
         let block = Block::bordered()
             .border_style(Style::new().fg(Color::DarkGray))
-            .title(Span::styled(" Conversation ", Style::new().fg(Color::Cyan)));
+            .title(Span::styled(" Conversation ", Style::new().fg(AMBER)));
         let inner = block.inner(area);
         f.render_widget(block, area);
         let paragraph =
@@ -991,7 +995,11 @@ impl App {
                             " ".repeat(5)
                         };
                         let label = if first { "you " } else { "    " };
-                        lines.push(Line::from(vec![dim(margin), bold(label), Span::raw(l)]));
+                        lines.push(Line::from(vec![
+                            dim(margin),
+                            Span::styled(label, Style::new().fg(PLUM).add_modifier(Modifier::BOLD)),
+                            Span::raw(l),
+                        ]));
                         first = false;
                     }
                 }
@@ -1013,7 +1021,7 @@ impl App {
                     };
                     let mut spans = vec![
                         dim(format!("§{seq:<4}")),
-                        Span::styled(format!("▸ {} ", row.name), Style::new().fg(Color::Cyan)),
+                        Span::styled(format!("▸ {} ", row.name), Style::new().fg(VERDIGRIS)),
                         Span::raw(one_line(&row.summary, 70)),
                         Span::raw("  "),
                     ];
@@ -1036,7 +1044,7 @@ impl App {
                         && !matches!(row.state, State::Declined | State::Skipped)
                     {
                         let style = if row.state == State::Failed {
-                            Style::new().fg(Color::Red)
+                            Style::new().fg(BRICK)
                         } else {
                             Style::new().fg(Color::DarkGray)
                         };
@@ -1048,7 +1056,7 @@ impl App {
                 }
                 Entry::Note { text, error } => {
                     let style = if *error {
-                        Style::new().fg(Color::Red)
+                        Style::new().fg(BRICK)
                     } else {
                         Style::new().fg(Color::DarkGray)
                     };
@@ -1063,7 +1071,7 @@ impl App {
             .chain(self.queued.iter().map(|t| ("queued, after this turn", t)));
         for (label, text) in waiting {
             lines.push(Line::from(vec![
-                Span::styled(format!("     ↳ {label}: "), Style::new().fg(Color::Yellow)),
+                Span::styled(format!("     ↳ {label}: "), Style::new().fg(CLAY)),
                 Span::raw(one_line(text, 200)),
             ]));
         }
@@ -1080,17 +1088,14 @@ impl App {
             // Too narrow for every tab: the current one, and where it is.
             let at = Panel::ALL.iter().position(|p| *p == panel).unwrap_or(0) + 1;
             Line::from(vec![
-                Span::styled(
-                    format!(" ‹ {} › ", panel.title()),
-                    Style::new().fg(Color::Cyan),
-                ),
+                Span::styled(format!(" ‹ {} › ", panel.title()), Style::new().fg(AMBER)),
                 dim(format!("{at}/{} · Tab ", Panel::ALL.len())),
             ])
         } else if tabs {
             let mut spans = vec![Span::raw(" ")];
             for p in Panel::ALL {
                 let style = if p == panel {
-                    Style::new().fg(Color::Cyan)
+                    Style::new().fg(AMBER)
                 } else {
                     Style::new().fg(Color::DarkGray)
                 };
@@ -1100,7 +1105,7 @@ impl App {
         } else {
             Line::from(Span::styled(
                 format!(" {} ", panel.title()),
-                Style::new().fg(Color::Gray),
+                Style::new().fg(AMBER),
             ))
         };
         let block = Block::bordered()
@@ -1153,8 +1158,8 @@ impl App {
         let mut lines = vec![Line::from(vec![
             bold(format!("{} ", shown.summary)),
             dim(format!("§{} ", shown.seq)),
-            Span::styled(format!("+{added} "), Style::new().fg(Color::Green)),
-            Span::styled(format!("−{removed}  "), Style::new().fg(Color::Red)),
+            Span::styled(format!("+{added} "), Style::new().fg(SAGE)),
+            Span::styled(format!("−{removed}  "), Style::new().fg(BRICK)),
         ])];
         lines[0].spans.extend(state_spans(shown));
         lines.extend(preview.lines().map(|l| Line::from(diff_span(l))));
@@ -1191,9 +1196,9 @@ impl App {
             let time = r.duration_ms.map(status::duration).unwrap_or_default();
             let (state, color) = match r.state {
                 State::Running => ("running", Color::DarkGray),
-                State::Waiting => ("waiting", Color::Yellow),
-                State::Ok => ("ok", Color::Green),
-                State::Failed => ("failed", Color::Red),
+                State::Waiting => ("waiting", CLAY),
+                State::Ok => ("ok", SAGE),
+                State::Failed => ("failed", BRICK),
                 State::Declined => ("declined", Color::DarkGray),
                 State::Skipped => ("skipped", Color::DarkGray),
             };
@@ -1264,14 +1269,10 @@ impl App {
                 status::duration(r.duration_ms),
             )));
             match &r.problems {
-                Some(p) if p.is_empty() => spans.push(Span::styled(
-                    "→ plan accepted",
-                    Style::new().fg(Color::Green),
-                )),
-                Some(_) => spans.push(Span::styled(
-                    "→ plan refused",
-                    Style::new().fg(Color::Yellow),
-                )),
+                Some(p) if p.is_empty() => {
+                    spans.push(Span::styled("→ plan accepted", Style::new().fg(SAGE)))
+                }
+                Some(_) => spans.push(Span::styled("→ plan refused", Style::new().fg(CLAY))),
                 None if r.step.is_none() => spans.push(dim("→ planning")),
                 None if !r.calls.is_empty() => {
                     spans.push(Span::raw(format!("→ {}", r.calls.join(", "))))
@@ -1286,7 +1287,7 @@ impl App {
             for problem in r.problems.iter().flatten() {
                 lines.push(Line::from(Span::styled(
                     format!("        · {problem}"),
-                    Style::new().fg(Color::Yellow),
+                    Style::new().fg(CLAY),
                 )));
             }
         }
@@ -1352,13 +1353,15 @@ impl App {
                 status::tokens(status::CONTEXT_WINDOW)
             )),
         ])];
-        for (label, n) in parts {
+        // One pigment per part, so the bars read as a key to the total.
+        let colors = [STONE, PLUM, AMBER, VERDIGRIS, SLATE];
+        for ((label, n), color) in parts.into_iter().zip(colors) {
             let bar = "█".repeat(((n * bar_room).div_ceil(max)) as usize);
             lines.push(Line::from(vec![
                 Span::raw(format!("{label:<16}")),
                 Span::styled(
                     format!("{bar:<w$}", w = bar_room as usize),
-                    Style::new().fg(Color::Blue),
+                    Style::new().fg(color),
                 ),
                 Span::raw(format!(" ~{}", status::tokens(n))),
             ]));
@@ -1476,7 +1479,7 @@ impl App {
             if selected.is_some() {
                 line = line.style(Style::new().add_modifier(Modifier::REVERSED));
             } else if n == 3 && self.yes {
-                line = line.style(Style::new().fg(Color::Red));
+                line = line.style(Style::new().fg(BRICK));
             }
             lines.push(line);
         }
@@ -1515,7 +1518,7 @@ impl App {
         lines.push(if self.prefs.is_some() {
             Line::from(Span::styled(
                 "↑↓ choose · ←→ or Enter change · d remove a rule · s save as defaults · Esc done",
-                Style::new().fg(Color::Cyan),
+                Style::new().fg(VERDIGRIS),
             ))
         } else {
             dim("Ctrl-P changes these, from the next request on.").into()
@@ -1993,15 +1996,12 @@ fn state_spans(row: &ToolRow) -> Vec<Span<'static>> {
     let time = row.duration_ms.map(status::duration);
     let (text, color) = match row.state {
         State::Running => ("running".to_string(), Color::DarkGray),
-        State::Waiting => ("waiting for you".to_string(), Color::Yellow),
-        State::Ok => (
-            time.map(|t| format!("{t} ok")).unwrap_or("ok".into()),
-            Color::Green,
-        ),
+        State::Waiting => ("waiting for you".to_string(), CLAY),
+        State::Ok => (time.map(|t| format!("{t} ok")).unwrap_or("ok".into()), SAGE),
         State::Failed => (
             time.map(|t| format!("{t} failed"))
                 .unwrap_or("failed".into()),
-            Color::Red,
+            BRICK,
         ),
         State::Declined => ("declined".to_string(), Color::DarkGray),
         State::Skipped => ("skipped".to_string(), Color::DarkGray),
@@ -2011,8 +2011,8 @@ fn state_spans(row: &ToolRow) -> Vec<Span<'static>> {
 
 fn diff_span(line: &str) -> Span<'_> {
     let color = match line.chars().next() {
-        Some('+') => Color::Green,
-        Some('-') => Color::Red,
+        Some('+') => SAGE,
+        Some('-') => BRICK,
         _ => Color::DarkGray,
     };
     Span::styled(line, Style::new().fg(color))

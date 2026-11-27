@@ -2,6 +2,7 @@ mod carrels;
 mod editor;
 mod marginalia;
 mod notes;
+mod palette;
 mod settings;
 mod status;
 
@@ -20,7 +21,7 @@ use clap::{Parser, Subcommand};
 use marginalia::one_line;
 
 const DIM: &str = "\x1b[2m";
-const RED: &str = "\x1b[31m";
+const RED: &str = palette::ansi::BRICK;
 const RESET: &str = "\x1b[0m";
 
 /// Calexandria: a personal agent harness.
