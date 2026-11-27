@@ -1,3 +1,20 @@
+// These replace std's `print!` and `println!` in every module of this crate:
+// they ignore write errors instead of panicking, so `calx sessions | head`
+// ends quietly, and a closed stdout never stops a turn from being saved.
+// They must come before the `mod` lines to be in scope there.
+macro_rules! print {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        let _ = write!(std::io::stdout(), $($arg)*);
+    }};
+}
+macro_rules! println {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stdout(), $($arg)*);
+    }};
+}
+
 mod carrels;
 mod editor;
 mod marginalia;

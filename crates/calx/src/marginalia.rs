@@ -130,7 +130,7 @@ impl Marginalia {
                     line
                 }
                 None => {
-                    std::io::stdout().flush()?;
+                    let _ = std::io::stdout().flush();
                     let Some(line) = self.next_line().await else {
                         return Ok(Exit::Quit);
                     };
