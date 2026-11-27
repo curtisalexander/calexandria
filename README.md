@@ -145,7 +145,8 @@ model answers with a plan: *trim* tool outputs down to what it still needs, and
 *squish* runs of older items into a condensed record. A linter rejects a plan
 that splits a tool call from its output, touches the latest items, or leaves
 too much or too little, and the model tries again with the reasons, up to three
-times. The plan is saved as one more item in the session; nothing is deleted,
+times. If it still fails, or the context is still over the limit, calx waits
+until the context grows by a tenth of the limit before trying again. The plan is saved as one more item in the session; nothing is deleted,
 and every request sends the history with the plans applied, so the model never
 sees the compaction itself. Once a session has been compacted, the model also
 gets a `recall` tool that reads original items back by their `§` numbers, which

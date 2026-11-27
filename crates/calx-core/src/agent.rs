@@ -38,6 +38,10 @@ pub struct Agent {
     pub context_tokens: u64,
     /// Compact the conversation once it reaches this many tokens; `None` never does.
     pub compact_at: Option<u64>,
+    /// After a compaction that failed, or left the context still over
+    /// `compact_at`, the next one waits until the context reaches this; 0
+    /// when it need not wait.
+    pub compact_again_at: u64,
 }
 
 /// A tool call waiting for the user's yes or no.
@@ -78,19 +82,14 @@ impl Agent {
         self.items.push(Item::User {
             text: prompt.to_string(),
         });
-        // At most once a prompt, so a conversation that will not shrink
-        // does not spend every step trying.
-        let mut compacted = false;
         for step in 1..=MAX_STEPS {
             // Every call has its output here, so compaction sees a whole conversation.
-            if !compacted
-                && let Some(at) = self.compact_at
-                && self
-                    .context_tokens
-                    .max(compaction::view_tokens(&self.items))
-                    >= at
+            let tokens = self
+                .context_tokens
+                .max(compaction::view_tokens(&self.items));
+            if let Some(at) = self.compact_at
+                && tokens >= at.max(self.compact_again_at)
             {
-                compacted = true;
                 self.compact(on_event).await;
             }
             let items = compaction::request_items(&self.items);

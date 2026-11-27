@@ -520,6 +520,7 @@ async fn chat(cli: &Cli) -> Result<()> {
         items,
         context_tokens: 0,
         compact_at: (cli.compact_at > 0).then_some(cli.compact_at),
+        compact_again_at: 0,
     };
     // Saves the items a finished turn added. A turn that fails or is
     // interrupted is not saved, matching what the next turn sends the model.

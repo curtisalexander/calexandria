@@ -373,8 +373,24 @@ impl Agent {
     /// plan that passes is added as an [`Item::Compaction`].
     ///
     /// It reports through `on_event`, and never fails: a conversation that
-    /// cannot be compacted carries on as it is.
+    /// cannot be compacted carries on as it is. Automatic compaction then
+    /// waits for the context to grow by a tenth of `compact_at` before it
+    /// tries again, so a stuck conversation does not spend requests on
+    /// every prompt.
     pub async fn compact(&mut self, on_event: &mut dyn FnMut(Event)) -> bool {
+        let compacted = self.compact_once(on_event).await;
+        if let Some(at) = self.compact_at {
+            let now = self.context_tokens.max(view_tokens(&self.items));
+            self.compact_again_at = if compacted && now < at {
+                0
+            } else {
+                now + at / 10
+            };
+        }
+        compacted
+    }
+
+    async fn compact_once(&mut self, on_event: &mut dyn FnMut(Event)) -> bool {
         let tokens = self.context_tokens.max(view_tokens(&self.items));
         on_event(Event::CompactionStarted { tokens });
         match self.plan(tokens, on_event).await {
