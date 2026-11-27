@@ -7,6 +7,7 @@ pub mod approvals;
 pub mod auth;
 pub mod chat;
 pub mod environment;
+pub mod gateway;
 pub mod message;
 pub mod provider;
 pub mod responses;

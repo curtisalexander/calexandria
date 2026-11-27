@@ -65,6 +65,28 @@ calx --api chat --base-url https://openrouter.ai/api/v1 --key openrouter -m open
 calx key list                    # names only; `calx key remove NAME` deletes one
 ```
 
+### A company gateway
+
+`calx gateway login NAME` signs in to a gateway in the browser and keeps its
+token fresh in the background, so a session left open still works. The flow
+is standard OAuth with every endpoint configurable, until the real gateway's
+details are known:
+
+```sh
+calx gateway login work --start-url https://gw.example/auth/start \
+  --token-url https://gw.example/auth/token [--client-id ID] [--port 1456]
+calx --gateway work --api chat --base-url https://gw.example/v1 -m some-model
+calx gateway list                # `calx gateway logout NAME` removes one
+```
+
+The browser opens the start URL with `redirect_uri`
+(`http://127.0.0.1:1456/auth/callback`), `state`, and `client_id`, and comes
+back with `token=` or `code=`. calx exchanges that at the token URL (a
+`refresh_token` or `authorization_code` grant) for an access token, then
+exchanges again before each one expires, keeping the gateway's new refresh
+token when it rotates one. Later logins reuse the saved URLs. Over SSH, paste
+the URL the browser ends on, as with `calx login`.
+
 In fish, set defaults once with `set -Ux CALX_API chat`, `set -Ux CALX_BASE_URL
 http://localhost:11434/v1`, and `set -Ux CALX_MODEL qwen3:8b`; in bash or
 PowerShell, export the same variables. Chat Completions keeps no reasoning
@@ -125,6 +147,7 @@ into the terminal instead.
 | Reasoning effort | `--effort` | `CALX_EFFORT` | `medium` (Responses), not sent (chat) |
 | API | `--api` | `CALX_API` | `responses` (or `chat`) |
 | Server base URL | `--base-url` | `CALX_BASE_URL` | `https://api.openai.com/v1` (Responses only) |
+| Gateway sign-in to use | `--gateway` | `CALX_GATEWAY` | |
 | Saved API key to use | `--key` | `CALX_KEY` | ChatGPT sign-in (Responses), none (chat) |
 | An API key directly, hidden from commands | | `CALX_API_KEY` | |
 | Typing while calx works | `--while-busy` | `CALX_WHILE_BUSY` | `steer` (or `queue`, `stop`) |
@@ -133,7 +156,7 @@ into the terminal instead.
 | Encryption key, instead of the keychain | | `CALX_AUTH_KEY` | |
 | State directory | | `CALX_HOME` | `~/.calx` |
 
-Your sign-in and API keys are saved encrypted in `~/.calx/auth.json`. The key is in your OS
+Your sign-ins and API keys are saved encrypted in `~/.calx/auth.json`. The key is in your OS
 keychain: macOS Keychain, Windows Credential Manager, or the Linux Secret Service
 (GNOME Keyring or KWallet). On a machine without a keychain, such as a headless
 Linux server, set `CALX_AUTH_KEY` to a base64 string of 32 random bytes
@@ -150,7 +173,7 @@ the Keychain to ask once after each update whether calx may use its key.
 ## Roadmap
 
 1. Editing approval rules from the panel view.
-2. The work gateway's browser sign-in, with its token refreshed in the background.
+2. Fit the gateway sign-in to the real work gateway once its details are known.
 3. Terminal UI next steps: a Trace view of every request in a turn, and
    editable Prefs.
 4. Memory, and extensions written in Python.

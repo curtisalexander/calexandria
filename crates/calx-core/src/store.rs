@@ -18,6 +18,7 @@ use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use serde::{Deserialize, Serialize};
 
 use crate::auth::Credential;
+use crate::gateway::GatewayCredential;
 
 const KEYCHAIN_SERVICE: &str = "calexandria";
 const KEYCHAIN_ACCOUNT: &str = "auth-key";
@@ -33,6 +34,9 @@ struct Secrets {
     /// API keys by the name the user saved them under (`calx key set`).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     api_keys: BTreeMap<String, String>,
+    /// Gateway sign-ins by name (`calx gateway login`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    gateways: BTreeMap<String, GatewayCredential>,
 }
 
 /// The file on disk: a nonce and the encrypted, serialized `Secrets`.
@@ -94,6 +98,26 @@ impl CredentialStore {
 
     pub fn api_key_names(&self) -> Result<Vec<String>> {
         Ok(self.load_secrets()?.api_keys.into_keys().collect())
+    }
+
+    pub fn gateway(&self, name: &str) -> Result<Option<GatewayCredential>> {
+        Ok(self.load_secrets()?.gateways.remove(name))
+    }
+
+    /// Saves a gateway sign-in under `name`, or removes it with `None`.
+    pub fn set_gateway(&self, name: &str, credential: Option<&GatewayCredential>) -> Result<()> {
+        self.update(|s| match credential {
+            Some(c) => {
+                s.gateways.insert(name.to_string(), c.clone());
+            }
+            None => {
+                s.gateways.remove(name);
+            }
+        })
+    }
+
+    pub fn gateway_names(&self) -> Result<Vec<String>> {
+        Ok(self.load_secrets()?.gateways.into_keys().collect())
     }
 
     fn load_secrets(&self) -> Result<Secrets> {

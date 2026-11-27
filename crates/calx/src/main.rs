@@ -11,6 +11,7 @@ use calx_core::agent::Agent;
 use calx_core::approvals::Rules;
 use calx_core::auth::{API_KEY_ENV, Auth, ChatGptAuth, CredentialStore, PendingLogin};
 use calx_core::environment::{Environment, LocalEnvironment};
+use calx_core::gateway::{DEFAULT_PORT, GatewayAuth, GatewayConfig, PendingGatewayLogin};
 use calx_core::provider::{Api, Client, OPENAI_BASE_URL};
 use calx_core::session::Sessions;
 use calx_core::tools::Toolbox;
@@ -52,8 +53,18 @@ struct Cli {
 
     /// Use the API key saved under this name (`calx key set NAME`) instead of
     /// the ChatGPT sign-in. Without it, Chat Completions sends no key.
-    #[arg(long, env = "CALX_KEY", value_name = "NAME")]
+    #[arg(
+        long,
+        env = "CALX_KEY",
+        value_name = "NAME",
+        conflicts_with = "gateway"
+    )]
     key: Option<String>,
+
+    /// Authenticate with the gateway sign-in saved under this name
+    /// (`calx gateway login NAME`).
+    #[arg(long, env = "CALX_GATEWAY", value_name = "NAME")]
+    gateway: Option<String>,
 
     /// Run file edits and shell commands without asking first.
     #[arg(long, short = 'y')]
@@ -98,6 +109,30 @@ enum KeyCommand {
 }
 
 #[derive(Subcommand)]
+enum GatewayCommand {
+    /// Sign in to a gateway in the browser. Later logins reuse its URLs.
+    Login {
+        name: String,
+        /// Where the browser starts the sign-in.
+        #[arg(long)]
+        start_url: Option<String>,
+        /// Where calx exchanges the sign-in for access tokens.
+        #[arg(long)]
+        token_url: Option<String>,
+        /// The OAuth client ID, if the gateway wants one.
+        #[arg(long)]
+        client_id: Option<String>,
+        /// The localhost port the browser comes back to (default 1456).
+        #[arg(long)]
+        port: Option<u16>,
+    },
+    /// List the gateways you are signed in to.
+    List,
+    /// Remove a gateway sign-in.
+    Logout { name: String },
+}
+
+#[derive(Subcommand)]
 enum Command {
     /// Sign in with ChatGPT, so calx uses your ChatGPT plan.
     Login,
@@ -108,6 +143,9 @@ enum Command {
     /// Save, list, or remove API keys, kept encrypted with a key in the OS keychain.
     #[command(subcommand)]
     Key(KeyCommand),
+    /// Sign in to a company model gateway; its token is refreshed in the background.
+    #[command(subcommand)]
+    Gateway(GatewayCommand),
     /// List the approvals saved with `p` at an approval prompt.
     Rules {
         /// Remove rule N, as numbered in the list.
@@ -124,6 +162,7 @@ async fn main() -> Result<()> {
         Some(Command::Logout) => logout(),
         Some(Command::Sessions) => list_sessions(),
         Some(Command::Key(command)) => key(command),
+        Some(Command::Gateway(command)) => gateway(command).await,
         Some(Command::Rules { forget }) => rules(forget),
         None => chat(&cli).await,
     }
@@ -131,11 +170,30 @@ async fn main() -> Result<()> {
 
 async fn login() -> Result<()> {
     let pending = PendingLogin::start().await?;
-    println!(
-        "Sign in to ChatGPT in your browser. If it does not open, visit:\n\n  {}\n",
-        pending.url
-    );
-    let _ = open::that(&pending.url);
+    let code = browser_sign_in(
+        "Sign in to ChatGPT",
+        &pending.url,
+        pending.wait_for_callback(),
+        |line| pending.parse_pasted(line),
+    )
+    .await?;
+    let credential = pending.finish(code).await?;
+    let store = CredentialStore::open()?;
+    store.save(Some(&credential))?;
+    println!("Signed in. Saved to {}", store.path().display());
+    Ok(())
+}
+
+/// Opens `url` in the browser and waits for the sign-in to come back, either
+/// to the local callback server or as a URL the user pastes.
+async fn browser_sign_in<T>(
+    what: &str,
+    url: &str,
+    callback: impl std::future::Future<Output = Result<T>>,
+    parse_pasted: impl Fn(&str) -> Result<T>,
+) -> Result<T> {
+    println!("{what} in your browser. If it does not open, visit:\n\n  {url}\n");
+    let _ = open::that(url);
     println!(
         "If the browser cannot reach this machine (for example over SSH), paste the URL it ends on here:"
     );
@@ -151,20 +209,78 @@ async fn login() -> Result<()> {
             }
         }
     });
-
-    let code = loop {
+    tokio::pin!(callback);
+    loop {
         tokio::select! {
-            result = pending.wait_for_callback() => break result?,
-            Some(line) = pasted.recv() => match pending.parse_pasted(&line) {
-                Ok(code) => break code,
+            result = &mut callback => return result,
+            Some(line) = pasted.recv() => match parse_pasted(&line) {
+                Ok(grant) => return Ok(grant),
                 Err(e) => eprintln!("{e}"),
             },
         }
-    };
-    let credential = pending.finish(code).await?;
+    }
+}
+
+async fn gateway(command: GatewayCommand) -> Result<()> {
     let store = CredentialStore::open()?;
-    store.save(Some(&credential))?;
-    println!("Signed in. Saved to {}", store.path().display());
+    match command {
+        GatewayCommand::Login {
+            name,
+            start_url,
+            token_url,
+            client_id,
+            port,
+        } => {
+            let saved = store.gateway(&name)?.map(|c| c.config);
+            let config = match (start_url, token_url, saved) {
+                (Some(start_url), Some(token_url), _) => GatewayConfig {
+                    start_url,
+                    token_url,
+                    client_id,
+                    port: port.unwrap_or(DEFAULT_PORT),
+                },
+                (None, None, Some(mut saved)) => {
+                    saved.client_id = client_id.or(saved.client_id);
+                    saved.port = port.unwrap_or(saved.port);
+                    saved
+                }
+                (None, None, None) => {
+                    anyhow::bail!("the first login to {name} needs --start-url and --token-url")
+                }
+                _ => anyhow::bail!("give both --start-url and --token-url, or neither"),
+            };
+            let pending = PendingGatewayLogin::start(config).await?;
+            let grant = browser_sign_in(
+                &format!("Sign in to {name}"),
+                &pending.url,
+                pending.wait_for_callback(),
+                |line| pending.parse_pasted(line),
+            )
+            .await?;
+            let credential = pending.finish(grant).await?;
+            store.set_gateway(&name, Some(&credential))?;
+            println!(
+                "Signed in to {name}. Use it with `calx --gateway {name} --api chat --base-url <URL> -m <model>`."
+            );
+        }
+        GatewayCommand::List => {
+            let names = store.gateway_names()?;
+            if names.is_empty() {
+                println!(
+                    "No gateways. Sign in to one with `calx gateway login NAME --start-url URL --token-url URL`."
+                );
+            }
+            for name in names {
+                let c = store.gateway(&name)?.context("listed but missing")?;
+                println!("{name}  {DIM}{}{RESET}", c.config.start_url);
+            }
+        }
+        GatewayCommand::Logout { name } => {
+            anyhow::ensure!(store.gateway(&name)?.is_some(), "not signed in to {name}");
+            store.set_gateway(&name, None)?;
+            println!("Signed out of {name}.");
+        }
+    }
     Ok(())
 }
 
@@ -274,6 +390,8 @@ fn client(cli: &Cli) -> Result<(Client, String, Option<String>)> {
             name: API_KEY_ENV.into(),
             key,
         }
+    } else if let Some(name) = &cli.gateway {
+        Auth::Gateway(GatewayAuth::load(name, CredentialStore::open()?)?)
     } else if let Some(name) = &cli.key {
         let key = CredentialStore::open()?
             .api_key(name)?

@@ -5,6 +5,7 @@
 //! issued client ID with the authorization code). The access token then works
 //! as a bearer token for the public Responses API at api.openai.com.
 
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -17,6 +18,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex, mpsc};
 use url::Url;
 
+use crate::gateway::GatewayAuth;
 pub use crate::store::CredentialStore;
 
 const DEFAULT_AUTH_BASE_URL: &str = "https://auth.openai.com";
@@ -39,14 +41,14 @@ fn auth_base_url() -> String {
     std::env::var("CALX_AUTH_BASE_URL").unwrap_or_else(|_| DEFAULT_AUTH_BASE_URL.to_string())
 }
 
-fn now_secs() -> u64 {
+pub(crate) fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
 }
 
-fn random_token() -> Result<String> {
+pub(crate) fn random_token() -> Result<String> {
     let mut bytes = [0u8; 32];
     getrandom::fill(&mut bytes).map_err(|e| anyhow!("no system randomness: {e}"))?;
     Ok(URL_SAFE_NO_PAD.encode(bytes))
@@ -138,14 +140,16 @@ pub struct PendingLogin {
     pub url: String,
     verifier: String,
     state: String,
-    listener: TcpListener,
+    callback: Callback,
 }
 
 impl PendingLogin {
     pub async fn start() -> Result<Self> {
-        let listener = TcpListener::bind(("127.0.0.1", CALLBACK_PORT)).await.with_context(|| {
-            format!("port {CALLBACK_PORT} is in use, probably by another login in progress or by the Codex CLI; finish or cancel it and try again")
-        })?;
+        let callback = Callback::bind(
+            CALLBACK_PORT,
+            "probably by another login in progress or by the Codex CLI",
+        )
+        .await?;
         let verifier = random_token()?;
         let state = random_token()?;
         let mut url = Url::parse(&format!("{}/api/accounts/authorize", auth_base_url()))?;
@@ -165,24 +169,16 @@ impl PendingLogin {
             url: url.into(),
             verifier,
             state,
-            listener,
+            callback,
         })
     }
 
     /// Waits for the browser to reach the local callback server.
     pub async fn wait_for_callback(&self) -> Result<AuthCode> {
-        let (tx, mut rx) = mpsc::channel(4);
-        loop {
-            tokio::select! {
-                accepted = self.listener.accept() => {
-                    let (stream, _) = accepted?;
-                    // Browsers open spare connections that never send a request,
-                    // so each connection gets its own task instead of blocking the loop.
-                    tokio::spawn(handle_callback(stream, self.state.clone(), tx.clone()));
-                }
-                Some(result) = rx.recv() => return result,
-            }
-        }
+        let state = self.state.clone();
+        self.callback
+            .wait(move |url| parse_callback(url, &state))
+            .await
     }
 
     /// Reads the redirect URL the user pasted, for when the browser cannot
@@ -235,7 +231,60 @@ fn parse_callback(url: &Url, expected_state: &str) -> Result<AuthCode> {
     })
 }
 
-async fn handle_callback(mut stream: TcpStream, state: String, tx: mpsc::Sender<Result<AuthCode>>) {
+/// Reads a callback URL: the sign-in's result, or why it failed.
+type Parse<T> = Arc<dyn Fn(&Url) -> Result<T> + Send + Sync>;
+
+/// A local server the browser comes back to after a sign-in, at
+/// `http://127.0.0.1:<port>/auth/callback`.
+pub(crate) struct Callback {
+    listener: TcpListener,
+    port: u16,
+}
+
+impl Callback {
+    /// `busy` says what probably holds the port, for the error when it is taken.
+    pub(crate) async fn bind(port: u16, busy: &str) -> Result<Self> {
+        let listener = TcpListener::bind(("127.0.0.1", port))
+            .await
+            .with_context(|| {
+                format!("port {port} is in use, {busy}; finish or cancel it and try again")
+            })?;
+        Ok(Self { listener, port })
+    }
+
+    pub(crate) fn redirect_uri(&self) -> String {
+        format!("http://127.0.0.1:{}{CALLBACK_PATH}", self.port)
+    }
+
+    /// Waits for a callback that `parse` accepts or rejects for good. A
+    /// response whose state does not match is answered and ignored, since it
+    /// may come from an earlier login.
+    pub(crate) async fn wait<T: Send + 'static>(
+        &self,
+        parse: impl Fn(&Url) -> Result<T> + Send + Sync + 'static,
+    ) -> Result<T> {
+        let parse: Parse<T> = Arc::new(parse);
+        let (tx, mut rx) = mpsc::channel(4);
+        loop {
+            tokio::select! {
+                accepted = self.listener.accept() => {
+                    let (stream, _) = accepted?;
+                    // Browsers open spare connections that never send a request,
+                    // so each connection gets its own task instead of blocking the loop.
+                    tokio::spawn(handle_callback(stream, self.port, parse.clone(), tx.clone()));
+                }
+                Some(result) = rx.recv() => return result,
+            }
+        }
+    }
+}
+
+async fn handle_callback<T>(
+    mut stream: TcpStream,
+    port: u16,
+    parse: Parse<T>,
+    tx: mpsc::Sender<Result<T>>,
+) {
     let mut buf = vec![0u8; 8192];
     let mut len = 0;
     while len < buf.len() {
@@ -249,9 +298,9 @@ async fn handle_callback(mut stream: TcpStream, state: String, tx: mpsc::Sender<
     }
     let request = String::from_utf8_lossy(&buf[..len]);
     let target = request.split_whitespace().nth(1).unwrap_or("/");
-    let url = Url::parse(&format!("http://127.0.0.1:{CALLBACK_PORT}{target}"));
+    let url = Url::parse(&format!("http://127.0.0.1:{port}{target}"));
     let (status, message, result) = match url {
-        Ok(url) if url.path() == CALLBACK_PATH => match parse_callback(&url, &state) {
+        Ok(url) if url.path() == CALLBACK_PATH => match parse(&url) {
             Ok(code) => (
                 "200 OK",
                 "Signed in to calx. You can close this window.".to_string(),
@@ -297,6 +346,8 @@ pub enum Auth {
     ChatGpt(ChatGptAuth),
     /// An API key; `name` is where it came from, for display.
     Key { name: String, key: String },
+    /// A company gateway's browser sign-in, kept fresh in the background.
+    Gateway(Arc<GatewayAuth>),
     /// No credentials, as for a model server on this machine.
     None,
 }
@@ -307,6 +358,7 @@ impl Auth {
         Ok(match self {
             Auth::ChatGpt(auth) => Some(auth.access_token().await?),
             Auth::Key { key, .. } => Some(key.clone()),
+            Auth::Gateway(auth) => Some(auth.access_token().await?),
             Auth::None => None,
         })
     }
@@ -316,6 +368,7 @@ impl Auth {
     pub async fn refresh(&self) -> Result<bool> {
         match self {
             Auth::ChatGpt(auth) => auth.refresh().await.map(|()| true),
+            Auth::Gateway(auth) => auth.refresh().await.map(|()| true),
             Auth::Key { .. } | Auth::None => Ok(false),
         }
     }
@@ -325,6 +378,7 @@ impl Auth {
         match self {
             Auth::ChatGpt(_) => "ChatGPT sign-in".into(),
             Auth::Key { name, .. } => format!("key {name}"),
+            Auth::Gateway(auth) => format!("gateway {}", auth.name),
             Auth::None => "no key".into(),
         }
     }

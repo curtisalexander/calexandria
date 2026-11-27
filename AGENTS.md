@@ -12,7 +12,8 @@ never pip. It must run on Windows, macOS, and Linux.
 - `crates/calx-core/src/provider.rs`: the request the agent sends and the
   `Client` that sends it, over the Responses API (`responses.rs`) or Chat
   Completions (`chat.rs`). How a request authenticates is `Auth` in `auth.rs`;
-  a new sign-in, such as a company gateway's, is a new `Auth` variant.
+  a new sign-in is a new `Auth` variant. `gateway.rs` is the company gateway's
+  browser sign-in, a configurable OAuth flow mocked until the real one is known.
 - `crates/calx-core/src/agent.rs`: the agent loop. Tools live in `tools/` and
   implement the `Tool` trait.
 - `crates/calx-core/src/environment.rs`: where tools act. Tools must do all file
