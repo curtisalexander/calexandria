@@ -162,6 +162,15 @@ enum Command {
     /// Sign in to a company model gateway; its token is refreshed in the background.
     #[command(subcommand)]
     Gateway(GatewayCommand),
+    /// List what calx remembers, forget a memory, or search past sessions.
+    Memory {
+        /// Remove memory N, as numbered in the list.
+        #[arg(long, value_name = "N", conflicts_with = "search")]
+        forget: Option<i64>,
+        /// Search every saved conversation for these words.
+        #[arg(long, value_name = "WORDS")]
+        search: Option<String>,
+    },
     /// List the approvals saved with `p` at an approval prompt.
     Rules {
         /// Remove rule N, as numbered in the list.
@@ -180,6 +189,7 @@ async fn main() -> Result<()> {
         Some(Command::Key(command)) => key(command),
         Some(Command::Gateway(command)) => gateway(command).await,
         Some(Command::Rules { forget }) => rules(forget),
+        Some(Command::Memory { forget, search }) => memory(forget, search),
         None => chat(&cli).await,
     }
 }
@@ -307,8 +317,8 @@ fn logout() -> Result<()> {
     Ok(())
 }
 
-fn system_prompt(env: &dyn Environment) -> String {
-    format!(
+fn system_prompt(env: &dyn Environment, memories: Option<String>) -> String {
+    let base = format!(
         "You are calx (Calexandria), Curtis Alexander's personal assistant, running in a terminal.\n\
          Be direct and concise. Format for a terminal: short paragraphs, plain lists, fenced code.\n\
          You can read, search, write, and edit files and run {} commands with your tools. Use \
@@ -318,7 +328,11 @@ fn system_prompt(env: &dyn Environment) -> String {
         env.shell_name(),
         env.os(),
         env.working_dir()
-    )
+    );
+    match memories {
+        Some(m) => format!("{base}\n\n{m}"),
+        None => base,
+    }
 }
 
 fn key(command: KeyCommand) -> Result<()> {
@@ -479,6 +493,43 @@ async fn window(
     })
 }
 
+fn memory(forget: Option<i64>, search: Option<String>) -> Result<()> {
+    let db = Sessions::open()?;
+    if let Some(id) = forget {
+        println!("Forgot memory {id}: {}", db.forget(id)?.text);
+        return Ok(());
+    }
+    if let Some(words) = search {
+        let hits = db.search_sessions(&words, 20)?;
+        if hits.is_empty() {
+            println!("No saved conversation matches.");
+        }
+        for h in hits {
+            println!(
+                "{} §{:<4} {DIM}{} · {}{RESET}\n      {}",
+                &h.session_id[..8.min(h.session_id.len())],
+                h.seq,
+                h.title,
+                ago(h.updated_at),
+                one_line(&h.snippet, 100)
+            );
+        }
+        println!("\n{DIM}Open one with `calx -r <id>`.{RESET}");
+        return Ok(());
+    }
+    let all = db.all_memories()?;
+    if all.is_empty() {
+        println!("No memories yet. `/remember TEXT` in a conversation saves one.");
+    }
+    for m in &all {
+        println!("{}", status::memory_line(m));
+        if let Some(p) = &m.project {
+            println!("     {DIM}{p}{RESET}");
+        }
+    }
+    Ok(())
+}
+
 fn rules(forget: Option<usize>) -> Result<()> {
     let mut rules = Rules::load(&std::env::current_dir()?)?;
     if let Some(n) = forget {
@@ -573,10 +624,14 @@ async fn chat(cli: &Cli) -> Result<()> {
         }
         None => (calx_core::new_id(), Vec::new()),
     };
+    let project = calx_core::memory::project_of(&cwd);
+    let memories = sessions.prompt_memories(Some(&project))?;
+    let mut toolbox = Toolbox::builtin(env.clone());
+    toolbox.extend(calx_core::memory::tools(&session_id, &project));
     let mut agent = Agent {
         client,
-        system: system_prompt(env.as_ref()),
-        toolbox: Toolbox::builtin(env),
+        system: system_prompt(env.as_ref(), memories),
+        toolbox,
         model,
         effort,
         session_id,

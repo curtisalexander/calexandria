@@ -17,7 +17,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::message::Item;
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 const SCHEMA: &str = "
 BEGIN;
 CREATE TABLE sessions (
@@ -52,7 +52,7 @@ pub struct SessionSummary {
 }
 
 pub struct Sessions {
-    conn: Connection,
+    pub(crate) conn: Connection,
 }
 
 impl Sessions {
@@ -71,17 +71,22 @@ impl Sessions {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", true)?;
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        match version {
-            0 => conn
-                .execute_batch(SCHEMA)
-                .context("could not create the sessions database")?,
-            SCHEMA_VERSION => {}
-            v => bail!(
-                "{} is version {v}, newer than this calx understands",
+        if version > SCHEMA_VERSION {
+            bail!(
+                "{} is version {version}, newer than this calx understands",
                 path.display()
-            ),
+            );
         }
-        Ok(Self { conn })
+        if version == 0 {
+            conn.execute_batch(SCHEMA)
+                .context("could not create the sessions database")?;
+        }
+        let db = Self { conn };
+        if version < 2 {
+            db.add_memory()
+                .context("could not add memory to the sessions database")?;
+        }
+        Ok(db)
     }
 
     /// Appends items to a session, creating the session if it is new. The
@@ -121,13 +126,13 @@ impl Sessions {
             let mut insert = tx.prepare(
                 "INSERT INTO items (session_id, seq, created_at, item) VALUES (?1, ?2, ?3, ?4)",
             )?;
+            let mut index = tx.prepare(crate::memory::INDEX_ITEM)?;
             for (i, item) in items.iter().enumerate() {
-                insert.execute(params![
-                    id,
-                    next + i as i64,
-                    now,
-                    serde_json::to_string(item)?
-                ])?;
+                let seq = next + i as i64;
+                insert.execute(params![id, seq, now, serde_json::to_string(item)?])?;
+                if let Some(text) = crate::memory::searchable(item) {
+                    index.execute(params![text, id, seq])?;
+                }
             }
         }
         tx.commit().context("could not save the session")

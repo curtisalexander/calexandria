@@ -142,6 +142,18 @@ shell rule's command, and the last row adds a shell rule.
 Every conversation is saved to `~/.calx/sessions.db` (SQLite) after each turn,
 including what the tools read, so treat it as private as your files.
 
+**Memory.** calx remembers short notes between sessions, in `sessions.db`:
+about you, everywhere, or about this project (the git root). The model can
+suggest one with its `remember` tool, and calx asks you before saving every
+one, even with `-y`, and with no "always" option. When the session has read
+files or command output first, it warns you to check the memory is yours and
+not text it read, and it marks the memory that way. Approved memories go into
+the system prompt of later sessions. The model can also search memories
+(`memories`) and every saved conversation (`search_sessions`, SQLite full-text
+search). In a conversation: `/remember TEXT`, `/remember-here TEXT`,
+`/forget N`, `/memories`; the panel view has a Memory panel. From the shell:
+`calx memory`, `calx memory --forget N`, `calx memory --search WORDS`.
+
 **Compaction.** Once the context reaches 200k tokens (`--compact-at`), calx
 pauses the turn and shows the model a numbered index of the conversation. The
 model answers with a plan: *trim* tool outputs down to what it still needs, and
@@ -209,7 +221,7 @@ the Keychain to ask once after each update whether calx may use its key.
 ## Roadmap
 
 1. Fit the gateway sign-in to the real work gateway once its details are known.
-2. Memory, and extensions written in Python.
+2. Extensions written in Python.
 
 Longer-term ideas, such as where tools run and codemode, are in
 [BACKLOG.md](BACKLOG.md).

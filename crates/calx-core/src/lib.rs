@@ -9,6 +9,7 @@ pub mod chat;
 pub mod compaction;
 pub mod environment;
 pub mod gateway;
+pub mod memory;
 pub mod message;
 pub mod provider;
 pub mod responses;

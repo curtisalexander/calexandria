@@ -64,6 +64,11 @@ impl Toolbox {
         }
     }
 
+    /// Adds tools, such as the memory tools for a session.
+    pub fn extend(&mut self, tools: Vec<Arc<dyn Tool>>) {
+        self.tools.extend(tools);
+    }
+
     pub fn specs(&self) -> Vec<ToolSpec> {
         self.tools.iter().map(|t| t.spec()).collect()
     }

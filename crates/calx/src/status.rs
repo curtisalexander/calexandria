@@ -4,7 +4,9 @@
 use std::collections::HashMap;
 
 use calx_core::agent::{Agent, DECLINED, SKIPPED};
-use calx_core::message::{Event, Exposure, Item, Usage};
+use calx_core::memory::Memory;
+use calx_core::message::{Event, Exposure, Usage};
+use calx_core::session::Sessions;
 
 /// The context window the views measure against when neither the user nor
 /// the server says what it is.
@@ -47,25 +49,8 @@ pub struct Tally {
 impl Tally {
     /// Starts from the tool calls already in a resumed session.
     pub fn new(agent: &Agent) -> Self {
-        let mut declined = std::collections::HashSet::new();
-        for item in &agent.items {
-            if let Item::ToolResult { call_id, output } = item
-                && !ran(output)
-            {
-                declined.insert(call_id.as_str());
-            }
-        }
-        let mut exposure = Exposure::default();
-        for item in &agent.items {
-            if let Item::ToolCall { call, .. } = item
-                && !declined.contains(call.id.as_str())
-                && let Some(tool) = agent.tool(&call.name)
-            {
-                exposure |= tool.exposure();
-            }
-        }
         Self {
-            exposure,
+            exposure: agent.opened(),
             ..Self::default()
         }
     }
@@ -236,6 +221,75 @@ pub fn compaction_note(event: &Event) -> Option<(String, bool)> {
         Event::CompactionFailed { reason } => (format!("could not compact: {reason}"), true),
         _ => return None,
     })
+}
+
+/// What `/remember`, `/remember-here`, `/forget N`, and `/memories` do,
+/// in either view: `None` when `line` is not one of them, else what to show
+/// and whether it is an error.
+pub fn memory_command(line: &str, project: &str, session_id: &str) -> Option<(String, bool)> {
+    let (command, rest) = line.split_once(char::is_whitespace).unwrap_or((line, ""));
+    let rest = rest.trim();
+    let result = (|| -> anyhow::Result<String> {
+        let db = Sessions::open()?;
+        Ok(match command {
+            "/remember" | "/remember-here" => {
+                let here = (command == "/remember-here").then_some(project);
+                let id = db.remember(rest, here, Some(session_id), false)?;
+                format!(
+                    "remembered as memory {id}, for {}; it is in the instructions from the next session on",
+                    if here.is_some() {
+                        "this project"
+                    } else {
+                        "you, everywhere"
+                    }
+                )
+            }
+            "/forget" => {
+                let id = rest.parse().map_err(|_| {
+                    anyhow::anyhow!("/forget takes a memory's number, from /memories")
+                })?;
+                format!("forgot memory {id}: {}", db.forget(id)?.text)
+            }
+            "/memories" => {
+                let all = db.memories(Some(project))?;
+                if all.is_empty() {
+                    "no memories yet; /remember TEXT saves one, and calx may suggest some".into()
+                } else {
+                    all.iter().map(memory_line).collect::<Vec<_>>().join("\n")
+                }
+            }
+            _ => unreachable!(),
+        })
+    })();
+    if !matches!(
+        command,
+        "/remember" | "/remember-here" | "/forget" | "/memories"
+    ) {
+        return None;
+    }
+    Some(match result {
+        Ok(text) => (text, false),
+        Err(e) => (format!("{e:#}"), true),
+    })
+}
+
+/// One memory, as both views and `calx memory` list it.
+pub fn memory_line(m: &Memory) -> String {
+    format!(
+        "{:>3}  {:<12} {}{}",
+        m.id,
+        if m.project.is_some() {
+            "this project"
+        } else {
+            "you"
+        },
+        m.text.replace('\n', " "),
+        if m.untrusted {
+            "  (saved after reading untrusted content)"
+        } else {
+            ""
+        }
+    )
 }
 
 /// A token count for display, such as 950, 31.2k, or 400k.

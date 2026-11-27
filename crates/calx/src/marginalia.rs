@@ -8,7 +8,7 @@ use std::io::{BufRead, IsTerminal, Write};
 
 use anyhow::Result;
 use calx_core::agent::{Agent, Approval, DECLINED, SKIPPED};
-use calx_core::approvals::{Rule, Rules};
+use calx_core::approvals::{Rule, Rules, always_asks};
 use calx_core::message::Event;
 
 use tokio::sync::{Notify, mpsc};
@@ -141,6 +141,16 @@ impl Marginalia {
                 "" => continue,
                 "/exit" | "/quit" => return Ok(Exit::Quit),
                 "/panels" => return Ok(Exit::Panels),
+                command
+                    if command.starts_with('/')
+                        && let Some((text, error)) =
+                            status::memory_command(command, &project_here(), &agent.session_id) =>
+                {
+                    let color = if error { RED } else { DIM };
+                    for line in text.lines() {
+                        println!("{:MARGIN$}{color}{line}{RESET}", "");
+                    }
+                }
                 "/compact" => {
                     let before = agent.items.len();
                     let tally = &mut self.tally;
@@ -285,7 +295,11 @@ impl Marginalia {
             let _ = out.flush();
         };
         let mut approve = async |ask: Approval| -> bool {
-            if yes || always.borrow().contains(&ask.name) || rules.borrow().allowing(&ask).is_some()
+            let every_time = always_asks(&ask.name);
+            if !every_time
+                && (yes
+                    || always.borrow().contains(&ask.name)
+                    || rules.borrow().allowing(&ask).is_some())
             {
                 return true;
             }
@@ -304,6 +318,7 @@ impl Marginalia {
                     let color = match text.chars().next() {
                         Some('+') => GREEN,
                         Some('-') => RED,
+                        Some('!') => YELLOW,
                         _ => DIM,
                     };
                     let _ = writeln!(out, "{BODY}{color}{text}{RESET}");
@@ -313,13 +328,19 @@ impl Marginalia {
                 "edit" => "Apply this edit?",
                 "write" => "Write this file?",
                 "shell" => "Run this command?",
+                "remember" => "Save this memory?",
                 _ => "Run this tool?",
+            };
+            let always_this = if every_time {
+                String::new()
+            } else {
+                format!("{BOLD}a{RESET} always this session  ")
             };
             loop {
                 let _ = write!(
                     out,
                     "\n{BODY}{BOLD}{question}{RESET}  {BOLD}y{RESET} yes  {BOLD}n{RESET} no  \
-                     {BOLD}a{RESET} always this session  {for_project}{BOLD}?{RESET} why  "
+                     {always_this}{for_project}{BOLD}?{RESET} why  "
                 );
                 let _ = out.flush();
                 asking.set(true);
@@ -335,7 +356,7 @@ impl Marginalia {
                 asking.set(false);
                 match answer.trim().to_lowercase().as_str() {
                     "y" | "yes" => return true,
-                    "a" | "always" => {
+                    "a" | "always" if !every_time => {
                         always.borrow_mut().insert(ask.name.clone());
                         return true;
                     }
@@ -612,6 +633,12 @@ async fn gather(
             return text;
         }
     }
+}
+
+/// The project memories here belong to.
+pub fn project_here() -> String {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    calx_core::memory::project_of(&cwd.display().to_string())
 }
 
 /// Prints a compaction event on its own line, numbered when it added an item.

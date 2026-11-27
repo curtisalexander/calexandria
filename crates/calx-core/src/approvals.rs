@@ -36,6 +36,9 @@ impl Rule {
     /// The rule `ask` would save, or `None` when no safe rule covers it,
     /// such as a command with shell syntax in it.
     pub fn suggest(project: &Path, ask: &Approval) -> Option<Rule> {
+        if always_asks(&ask.name) {
+            return None;
+        }
         let prefix = match ask.name.as_str() {
             "shell" => Some(command_prefix(&ask.summary)?),
             _ => None,
@@ -132,6 +135,9 @@ impl Rules {
 
     /// The saved rule that allows `ask` in this project, if any.
     pub fn allowing(&self, ask: &Approval) -> Option<&Rule> {
+        if always_asks(&ask.name) {
+            return None;
+        }
         let project = self.project.display().to_string();
         self.rules
             .iter()
@@ -183,6 +189,12 @@ impl Rules {
     }
 }
 
+/// Whether a tool asks every time: no rule, "always", or -y skips it.
+/// Saving a memory is one, since a memory comes back in every session.
+pub fn always_asks(tool: &str) -> bool {
+    tool == crate::memory::REMEMBER
+}
+
 #[derive(Serialize, Deserialize)]
 struct File {
     rules: Vec<Rule>,
@@ -221,7 +233,7 @@ fn command_matches(prefix: &str, command: &str) -> bool {
 }
 
 /// The git repository containing `dir`, or `dir` when there is none.
-fn project_root(dir: &Path) -> PathBuf {
+pub fn project_root(dir: &Path) -> PathBuf {
     dir.ancestors()
         .find(|d| d.join(".git").exists())
         .unwrap_or(dir)

@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use calx_core::agent::{Agent, Approval, DECLINED, MAX_STEPS, SKIPPED};
-use calx_core::approvals::{Rule, Rules};
+use calx_core::approvals::{Rule, Rules, always_asks};
 use calx_core::message::{Event, Exposure, Item, Usage};
 use crossterm::event::{
     DisableBracketedPaste, EnableBracketedPaste, Event as Input, EventStream, KeyCode, KeyEvent,
@@ -42,14 +42,16 @@ pub enum Panel {
     Inspect,
     Prefs,
     Trace,
+    Memory,
 }
 
 impl Panel {
     /// The side panels in the order Tab visits them.
-    const ALL: [Panel; 7] = [
+    const ALL: [Panel; 8] = [
         Panel::Diff,
         Panel::Tools,
         Panel::Trace,
+        Panel::Memory,
         Panel::Stats,
         Panel::Context,
         Panel::Inspect,
@@ -65,6 +67,7 @@ impl Panel {
             Panel::Inspect => "Self",
             Panel::Prefs => "Prefs",
             Panel::Trace => "Trace",
+            Panel::Memory => "Memory",
         }
     }
 }
@@ -72,7 +75,7 @@ impl Panel {
 /// Named layouts: the tile under the conversation, then the right column's two.
 pub const LAYOUTS: [(&str, [Panel; 3]); 3] = [
     ("coding", [Panel::Diff, Panel::Tools, Panel::Stats]),
-    ("research", [Panel::Context, Panel::Tools, Panel::Stats]),
+    ("research", [Panel::Context, Panel::Tools, Panel::Memory]),
     ("inspect", [Panel::Trace, Panel::Inspect, Panel::Context]),
 ];
 
@@ -600,6 +603,13 @@ impl App {
         }
     }
 
+    /// Whether the pending approval is one that asks every time, a memory.
+    fn pending_always_asks(&self) -> bool {
+        self.pending
+            .as_ref()
+            .is_some_and(|(ask, _)| always_asks(&ask.name))
+    }
+
     /// The rule `p` would save for the pending approval.
     fn suggested_rule(&self) -> Option<Rule> {
         let (ask, _) = self.pending.as_ref()?;
@@ -724,7 +734,7 @@ impl App {
             match key.code {
                 KeyCode::Esc => return true,
                 KeyCode::Char('y') => self.answer(true, false),
-                KeyCode::Char('a') => self.answer(true, true),
+                KeyCode::Char('a') if !self.pending_always_asks() => self.answer(true, true),
                 KeyCode::Char('p') => self.allow_in_project(),
                 KeyCode::Char('n') => self.answer(false, false),
                 KeyCode::Char('?') => self.show_why = !self.show_why,
@@ -940,9 +950,10 @@ impl App {
                     Span::raw(" yes  "),
                     bold("n"),
                     Span::raw(" no  "),
-                    bold("a"),
-                    Span::raw(" always this session  "),
                 ];
+                if !always_asks(&ask.name) {
+                    spans.extend([bold("a"), Span::raw(" always this session  ")]);
+                }
                 if let Some(rule) = &rule {
                     spans.push(bold("p"));
                     spans.push(Span::raw(format!(
@@ -1140,6 +1151,7 @@ impl App {
             Panel::Inspect => (self.self_lines(width), false),
             Panel::Prefs => (self.prefs_lines(width), false),
             Panel::Trace => (self.trace_lines(), true),
+            Panel::Memory => (self.memory_lines(), false),
         };
         let paragraph = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });
         let top = if stick_to_bottom {
@@ -1302,6 +1314,44 @@ impl App {
                 )));
             }
         }
+        lines
+    }
+
+    /// What calx remembers for you and this project, read fresh from the
+    /// database so it shows memories saved during this session.
+    fn memory_lines(&self) -> Vec<Line<'_>> {
+        let project = crate::marginalia::project_here();
+        let memories =
+            calx_core::session::Sessions::open().and_then(|db| db.memories(Some(&project)));
+        let mut lines = Vec::new();
+        match memories {
+            Err(e) => lines.push(Line::from(Span::styled(
+                format!("{e:#}"),
+                Style::new().fg(BRICK),
+            ))),
+            Ok(all) if all.is_empty() => lines.push(dim("No memories yet.").into()),
+            Ok(all) => {
+                for m in all {
+                    let scope = if m.project.is_some() { "here" } else { "you " };
+                    let mut spans = vec![
+                        dim(format!("{:>3} ", m.id)),
+                        Span::styled(format!("{scope} "), Style::new().fg(PLUM)),
+                        Span::raw(m.text.replace('\n', " ")),
+                    ];
+                    if m.untrusted {
+                        spans.push(Span::styled(
+                            "  ! after untrusted content",
+                            Style::new().fg(CLAY),
+                        ));
+                    }
+                    lines.push(Line::from(spans));
+                }
+            }
+        }
+        lines.extend([
+            Line::default(),
+            dim("/remember TEXT for you, /remember-here TEXT for this project, /forget N, /memories. calx asks before saving any memory it suggests, even with -y. `calx memory --search WORDS` searches past sessions.").into(),
+        ]);
         lines
     }
 
@@ -1866,6 +1916,20 @@ async fn main_loop(
         match prompt.trim() {
             "" => {}
             "/exit" | "/quit" => return Ok(()),
+            command
+                if command.starts_with('/')
+                    && let Some((text, error)) = status::memory_command(
+                        command,
+                        &crate::marginalia::project_here(),
+                        &agent.session_id,
+                    ) =>
+            {
+                let mut a = app.borrow_mut();
+                for line in text.lines() {
+                    a.note(line.to_string(), error);
+                }
+                a.side = Panel::Memory;
+            }
             "/compact" => {
                 let before = agent.items.len();
                 refresh_window(app, agent).await;
@@ -1986,7 +2050,9 @@ async fn turn(
         let mut approve = async |ask: Approval| -> bool {
             {
                 let a = app.borrow();
-                if a.yes || a.always.contains(&ask.name) || a.rules.allowing(&ask).is_some() {
+                if !always_asks(&ask.name)
+                    && (a.yes || a.always.contains(&ask.name) || a.rules.allowing(&ask).is_some())
+                {
                     return true;
                 }
             }
@@ -2080,6 +2146,7 @@ fn question(tool: &str) -> &'static str {
         "edit" => "Apply this edit?",
         "write" => "Write this file?",
         "shell" => "Run this command?",
+        "remember" => "Save this memory?",
         _ => "Run this tool?",
     }
 }
@@ -2105,6 +2172,7 @@ fn diff_span(line: &str) -> Span<'_> {
     let color = match line.chars().next() {
         Some('+') => SAGE,
         Some('-') => BRICK,
+        Some('!') => CLAY,
         _ => Color::DarkGray,
     };
     Span::styled(line, Style::new().fg(color))

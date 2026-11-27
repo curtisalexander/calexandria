@@ -181,6 +181,31 @@ impl Agent {
         self.toolbox.get(name)
     }
 
+    /// The legs of the trifecta the tool calls that ran have opened in this
+    /// conversation; declined and skipped calls open none.
+    pub fn opened(&self) -> Exposure {
+        let ran: std::collections::HashSet<&str> = self
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Item::ToolResult { call_id, output } if output != DECLINED && output != SKIPPED => {
+                    Some(call_id.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        let mut exposure = Exposure::default();
+        for item in &self.items {
+            if let Item::ToolCall { call, .. } = item
+                && ran.contains(call.id.as_str())
+                && let Some(tool) = self.tool(&call.name)
+            {
+                exposure |= tool.exposure();
+            }
+        }
+        exposure
+    }
+
     fn recall(&self) -> compaction::Recall {
         compaction::Recall {
             items: Arc::new(self.items.clone()),
@@ -196,7 +221,14 @@ impl Agent {
         approve: &mut impl AsyncFnMut(Approval) -> bool,
     ) -> String {
         let name = call.name.clone();
-        let args: Result<Value, _> = serde_json::from_str(&call.arguments);
+        let mut args: Result<Value, _> = serde_json::from_str(&call.arguments);
+        // A memory records whether the session had read untrusted content,
+        // which only the harness knows; the model cannot set it.
+        if call.name == crate::memory::REMEMBER
+            && let Ok(Value::Object(map)) = &mut args
+        {
+            map.insert("untrusted".into(), self.opened().untrusted.into());
+        }
         let tool = self.tool(&call.name);
         let summary = match (&tool, &args) {
             (Some(tool), Ok(args)) => tool.summary(args),
